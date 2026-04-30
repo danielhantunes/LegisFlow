@@ -2,6 +2,16 @@ name: terraform-tfstate-backend-dev
 
 on:
   workflow_dispatch:
+    inputs:
+      terraform_action:
+        description: "Terraform action to execute"
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
 
 permissions:
   id-token: write
@@ -43,9 +53,20 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
+      - name: Enforce main branch for apply/destroy
+        if: ${{ inputs.terraform_action != 'plan' && github.ref != 'refs/heads/main' }}
+        run: |
+          echo "Apply and destroy are only allowed from main branch."
+          exit 1
+
       - name: Terraform Plan
+        if: ${{ inputs.terraform_action == 'plan' }}
         run: terraform plan -input=false -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}"
 
       - name: Terraform Apply
-        if: github.ref == 'refs/heads/main'
+        if: ${{ inputs.terraform_action == 'apply' && github.ref == 'refs/heads/main' }}
         run: terraform apply -auto-approve -input=false -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: Terraform Destroy
+        if: ${{ inputs.terraform_action == 'destroy' && github.ref == 'refs/heads/main' }}
+        run: terraform destroy -auto-approve -input=false -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}"
