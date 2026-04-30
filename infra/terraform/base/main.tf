@@ -35,7 +35,7 @@ resource "azurerm_storage_account" "lakehouse" {
   shared_access_key_enabled       = true
 
   blob_properties {
-    versioning_enabled  = true
+    # ADLS Gen2 accounts (HNS enabled) do not support blob versioning.
     change_feed_enabled = true
   }
 
