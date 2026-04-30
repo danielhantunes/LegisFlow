@@ -1,0 +1,81 @@
+name: terraform-ingestion-dev
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: "true"
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  TF_BACKEND_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP_NAME }}
+  TF_BACKEND_STORAGE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT_NAME }}
+  TF_BACKEND_CONTAINER: ${{ vars.TFSTATE_CONTAINER_NAME }}
+  TF_BACKEND_KEY: ingestion-dev.tfstate
+
+jobs:
+  terraform:
+    name: Provision Ingestion Resources (dev)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: infra/terraform/ingestion
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init (remote backend)
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${TF_BACKEND_RESOURCE_GROUP}" \
+            -backend-config="storage_account_name=${TF_BACKEND_STORAGE_ACCOUNT}" \
+            -backend-config="container_name=${TF_BACKEND_CONTAINER}" \
+            -backend-config="key=${TF_BACKEND_KEY}"
+
+      - name: Resolve base outputs
+        id: base
+        run: |
+          terraform -chdir=../base init \
+            -backend-config="resource_group_name=${TF_BACKEND_RESOURCE_GROUP}" \
+            -backend-config="storage_account_name=${TF_BACKEND_STORAGE_ACCOUNT}" \
+            -backend-config="container_name=${TF_BACKEND_CONTAINER}" \
+            -backend-config="key=base-dev.tfstate"
+          adls_name=$(terraform -chdir=../base output -raw lakehouse_storage_account_name)
+          adls_id=$(terraform -chdir=../base output -raw lakehouse_storage_account_id)
+          echo "adls_name=${adls_name}" >> "$GITHUB_OUTPUT"
+          echo "adls_id=${adls_id}" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: |
+          terraform plan -input=false \
+            -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            -var="lakehouse_storage_account_name=${{ steps.base.outputs.adls_name }}" \
+            -var="lakehouse_storage_account_id=${{ steps.base.outputs.adls_id }}"
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main'
+        run: |
+          terraform apply -auto-approve -input=false \
+            -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            -var="lakehouse_storage_account_name=${{ steps.base.outputs.adls_name }}" \
+            -var="lakehouse_storage_account_id=${{ steps.base.outputs.adls_id }}"
