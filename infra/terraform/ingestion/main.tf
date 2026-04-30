@@ -48,7 +48,7 @@ resource "azurerm_service_plan" "functions" {
   tags                = var.tags
 }
 
-resource "azurerm_linux_function_app" "ceap" {
+resource "azurerm_linux_function_app" "ingestion" {
   name                = var.function_app_name
   resource_group_name = var.resource_group_name
   location            = var.location
@@ -91,5 +91,5 @@ resource "azurerm_linux_function_app" "ceap" {
 resource "azurerm_role_assignment" "function_blob_contributor" {
   scope                = var.lakehouse_storage_account_id
   role_definition_name = "Storage Blob Data Contributor"
-  principal_id         = azurerm_linux_function_app.ceap.identity[0].principal_id
+  principal_id         = azurerm_linux_function_app.ingestion.identity[0].principal_id
 }

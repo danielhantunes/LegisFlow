@@ -1,14 +1,14 @@
 # ingestion
 
-This module provisions the ingestion runtime for LegisFlow CEAP pipeline.
+This module provisions the shared ingestion runtime (single Function App) for LegisFlow MVP.
 
 ## Resources
 
-- Linux Azure Function App (`~4`, Python 3.11)
+- Linux Azure Function App (`~4`, Python 3.11), default name `func-legisflow-ingestion-dev`
 - Consumption App Service Plan (`Y1`)
 - Dedicated Function storage account
 - Azure Table Storage table for ingestion state control
-- System-assigned managed identity for Function App
+- System-assigned managed identity for the shared Function App
 - RBAC assignment on Lakehouse ADLS: `Storage Blob Data Contributor`
 
 ## Inputs expected from base module

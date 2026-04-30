@@ -129,13 +129,6 @@ Secrets:
 - `AZURE_TENANT_ID`
 - `AZURE_SUBSCRIPTION_ID`
 
-Variables:
-
-- `TFSTATE_RESOURCE_GROUP_NAME=rg-legisflow-dev-tfstate`
-- `TFSTATE_STORAGE_ACCOUNT_NAME=stlegisflowdevtfstate`
-- `TFSTATE_CONTAINER_NAME=tfstate`
-- `CEAP_FUNCTION_APP_NAME=func-legisflow-dev-ceap`
-
 ## Security and Cost Principles
 
 - Managed Identity and RBAC for ADLS access
@@ -150,4 +143,3 @@ Variables:
 The next implementation step is creating the Databricks Terraform module and deployment workflows:
 
 - `.github/workflows/terraform-databricks-dev.yml`
-- `.github/workflows/deploy-databricks-jobs.yml`

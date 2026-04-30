@@ -17,8 +17,8 @@ variable "resource_group_name" {
 
 variable "function_app_name" {
   type        = string
-  description = "Function App name for CEAP ingestion."
-  default     = "func-legisflow-dev-ceap"
+  description = "Shared Function App name for ingestion workloads."
+  default     = "func-legisflow-ingestion-dev"
 }
 
 variable "function_storage_account_name_prefix" {

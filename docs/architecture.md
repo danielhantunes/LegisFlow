@@ -20,7 +20,7 @@ The architecture is production-oriented, but constrained to a portfolio-friendly
 
 ## 3) Platform Components
 
-- **Azure Functions**: timer-triggered ingestion orchestration for deputies and CEAP expenses
+- **Azure Functions**: one shared Function App for ingestion workloads in MVP
 - **ADLS Gen2 (dedicated account)**: persistent Lakehouse storage for Raw/Bronze/Silver/Gold/logs/checkpoints
 - **Azure Databricks**: PySpark transformations and Delta modeling
 - **Delta Lake**: analytical table format for Bronze/Silver/Gold
@@ -40,7 +40,7 @@ The architecture uses separate resource groups for workload and Terraform backen
 
 ## 5) End-to-End Data Flow
 
-1. Timer-triggered Azure Function starts CEAP ingestion run.
+1. Timer-triggered CEAP function (`ceap_expenses_ingestion_timer`) starts ingestion run.
 2. Function ingests deputies first from API and writes raw payloads.
 3. Function builds the eligible deputy list dynamically (no fixed list of 513).
 4. Function creates/updates expense partitions by `deputado_id x ano x mes`.
@@ -199,14 +199,27 @@ Each module uses isolated backend key:
 
 ## 12) CI/CD Architecture (GitHub Actions)
 
-Planned workflows:
+Current MVP workflows:
 
 1. `terraform-tfstate-backend-dev.yml`
 2. `terraform-base-dev.yml`
 3. `terraform-ingestion-dev.yml`
 4. `terraform-databricks-dev.yml`
 5. `deploy-function-ceap.yml`
-6. `deploy-databricks-jobs.yml`
+
+MVP intentionally excludes Databricks asset deployment workflow and future function deployment workflows.
+
+## 12.1) Function App and Function Scope (MVP)
+
+- One Function App: `func-legisflow-ingestion-dev`
+- Implemented now: `ceap_expenses_ingestion_timer`
+- Not implemented yet:
+  - `legislative_events_ingestion_timer`
+  - `voting_microbatch_timer`
+  - `parliamentary_fronts_ingestion_timer`
+  - `propositions_lifecycle_ingestion_timer`
+
+Future endpoints must be delivered later as separate functions inside the same Function App, not inside the CEAP function implementation.
 
 Authentication model:
 
@@ -216,6 +229,7 @@ Authentication model:
   - `contents: read`
 - no client secret usage
 - main branch subject binding for federated credentials
+- only GitHub Secrets are required in MVP (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`)
 
 ## 13) Observability and Operations
 
@@ -234,7 +248,7 @@ Security:
 - Managed Identity for Function-to-ADLS access
 - RBAC over storage permissions
 - GitHub Secrets only for sensitive values
-- GitHub Variables for non-sensitive configuration
+- MVP workflows use fixed non-sensitive values to reduce setup overhead
 - no Azure Key Vault in MVP
 
 Cost:

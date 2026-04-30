@@ -9,8 +9,8 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.11"
-  FUNCTIONAPP_PACKAGE_PATH: "functions/ceap_ingestion"
-  AZURE_FUNCTIONAPP_NAME: ${{ vars.CEAP_FUNCTION_APP_NAME }}
+  FUNCTIONAPP_PACKAGE_PATH: "functions/ceap_expenses_ingestion_timer"
+  AZURE_FUNCTIONAPP_NAME: func-legisflow-ingestion-dev
 
 jobs:
   build-and-deploy:
