@@ -14,6 +14,8 @@ locals {
   )
 
   lakehouse_directories = toset([
+    "logs",
+    "raw/camara/deputados",
     "raw/camara/deputados/api",
     "raw/camara/ceap/files",
     "raw/camara/ceap/api/despesas",
