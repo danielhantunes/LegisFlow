@@ -12,6 +12,50 @@ locals {
     0,
     24
   )
+
+  lakehouse_directories = toset([
+    "raw",
+    "raw/camara",
+    "raw/camara/deputados",
+    "raw/camara/deputados/api",
+    "raw/camara/ceap",
+    "raw/camara/ceap/files",
+    "raw/camara/ceap/api",
+    "raw/camara/ceap/api/despesas",
+    "raw/camara/votacoes",
+    "raw/camara/votacoes/api",
+    "bronze",
+    "bronze/ceap",
+    "bronze/ceap/despesas",
+    "bronze/ceap/deputados",
+    "bronze/votacoes",
+    "silver",
+    "silver/ceap",
+    "silver/ceap/fato_despesas",
+    "silver/ceap/dim_deputado",
+    "silver/ceap/dim_fornecedor",
+    "silver/ceap/dim_categoria",
+    "silver/ceap/dim_tempo",
+    "silver/ceap/dim_partido",
+    "silver/ceap/dim_uf",
+    "gold",
+    "gold/ceap",
+    "gold/ceap/fato_despesas",
+    "gold/ceap/vw_despesas_deputados",
+    "gold/ceap/vw_despesas_liderancas",
+    "gold/ceap/vw_top10_partidos_mes",
+    "gold/ceap/vw_ranking_fornecedores_deputados",
+    "gold/ceap/vw_anomalias_despesas",
+    "checkpoints",
+    "checkpoints/ceap",
+    "checkpoints/votacoes",
+    "logs",
+    "logs/ingestion",
+    "logs/quality",
+    "quarantine",
+    "quarantine/ceap",
+    "quarantine/ceap/invalid_records",
+  ])
 }
 
 resource "azurerm_resource_group" "main" {
@@ -45,6 +89,15 @@ resource "azurerm_storage_account" "lakehouse" {
 resource "azurerm_storage_data_lake_gen2_filesystem" "lakehouse" {
   name               = var.lakehouse_filesystem_name
   storage_account_id = azurerm_storage_account.lakehouse.id
+}
+
+resource "azurerm_storage_data_lake_gen2_path" "lakehouse_directories" {
+  for_each = local.lakehouse_directories
+
+  path               = each.value
+  filesystem_name    = azurerm_storage_data_lake_gen2_filesystem.lakehouse.name
+  storage_account_id = azurerm_storage_account.lakehouse.id
+  resource           = "directory"
 }
 
 resource "azurerm_user_assigned_identity" "workload" {
