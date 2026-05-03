@@ -34,6 +34,12 @@ resource "azurerm_storage_account" "function" {
   tags = var.tags
 }
 
+resource "azurerm_storage_container" "function_package" {
+  name                  = "function-releases"
+  storage_account_id    = azurerm_storage_account.function.id
+  container_access_type = "private"
+}
+
 resource "azurerm_storage_table" "state" {
   name                 = var.state_table_name
   storage_account_name = azurerm_storage_account.function.name
@@ -44,29 +50,37 @@ resource "azurerm_service_plan" "functions" {
   resource_group_name = var.resource_group_name
   location            = var.location
   os_type             = "Linux"
-  sku_name            = "Y1"
-  tags                = var.tags
+  # Flex Consumption avoids classic Linux Consumption (Y1) "Dynamic VMs" quota requirements
+  # and is the recommended path for Linux Functions going forward.
+  sku_name = "FC1"
+  tags     = var.tags
 }
 
-resource "azurerm_linux_function_app" "ingestion" {
+resource "azurerm_function_app_flex_consumption" "ingestion" {
   name                = var.function_app_name
   resource_group_name = var.resource_group_name
   location            = var.location
 
-  service_plan_id            = azurerm_service_plan.functions.id
-  storage_account_name       = azurerm_storage_account.function.name
-  storage_account_access_key = azurerm_storage_account.function.primary_access_key
+  service_plan_id = azurerm_service_plan.functions.id
+
+  storage_container_type      = "blobContainer"
+  storage_container_endpoint  = "${azurerm_storage_account.function.primary_blob_endpoint}${azurerm_storage_container.function_package.name}"
+  storage_authentication_type = "StorageAccountConnectionString"
+  storage_access_key          = azurerm_storage_account.function.primary_access_key
+
+  runtime_name    = "python"
+  runtime_version = "3.11"
 
   functions_extension_version = "~4"
   https_only                  = true
 
+  maximum_instance_count = 50
+  instance_memory_in_mb  = 2048
+
   site_config {
-    application_stack {
-      python_version = "3.11"
-    }
-    ftps_state              = "Disabled"
     application_insights_key               = data.azurerm_application_insights.main.instrumentation_key
     application_insights_connection_string = data.azurerm_application_insights.main.connection_string
+    ftps_state                             = "Disabled"
   }
 
   identity {
@@ -74,15 +88,12 @@ resource "azurerm_linux_function_app" "ingestion" {
   }
 
   app_settings = {
-    "APPINSIGHTS_INSTRUMENTATIONKEY"            = data.azurerm_application_insights.main.instrumentation_key
-    "APPLICATIONINSIGHTS_CONNECTION_STRING"     = data.azurerm_application_insights.main.connection_string
-    "AzureWebJobsStorage"                       = azurerm_storage_account.function.primary_connection_string
-    "FUNCTIONS_WORKER_RUNTIME"                  = "python"
-    "WEBSITE_RUN_FROM_PACKAGE"                  = "1"
-    "CEAP_TIMER_SCHEDULE"                       = var.ceap_timer_schedule
-    "INGESTION_STATE_TABLE"                     = azurerm_storage_table.state.name
-    "RAW_STORAGE_ACCOUNT_NAME"                  = var.lakehouse_storage_account_name
-    "MAX_RETRY_ATTEMPTS"                        = tostring(var.max_retry_attempts)
+    "FUNCTIONS_WORKER_RUNTIME" = "python"
+    "WEBSITE_RUN_FROM_PACKAGE" = "1"
+    "CEAP_TIMER_SCHEDULE"      = var.ceap_timer_schedule
+    "INGESTION_STATE_TABLE"    = azurerm_storage_table.state.name
+    "RAW_STORAGE_ACCOUNT_NAME" = var.lakehouse_storage_account_name
+    "MAX_RETRY_ATTEMPTS"       = tostring(var.max_retry_attempts)
   }
 
   tags = var.tags
@@ -91,5 +102,5 @@ resource "azurerm_linux_function_app" "ingestion" {
 resource "azurerm_role_assignment" "function_blob_contributor" {
   scope                = var.lakehouse_storage_account_id
   role_definition_name = "Storage Blob Data Contributor"
-  principal_id         = azurerm_linux_function_app.ingestion.identity[0].principal_id
+  principal_id         = azurerm_function_app_flex_consumption.ingestion.identity[0].principal_id
 }

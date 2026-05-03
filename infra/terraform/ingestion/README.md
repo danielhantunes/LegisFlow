@@ -4,9 +4,9 @@ This module provisions the shared ingestion runtime (single Function App) for Le
 
 ## Resources
 
-- Linux Azure Function App (`~4`, Python 3.11), default name `func-legisflow-ingestion-dev`
-- Consumption App Service Plan (`Y1`)
+- Linux Azure Function App on **Flex Consumption** (`FC1`) (`~4`, Python 3.11), default name `func-legisflow-ingestion-dev`
 - Dedicated Function storage account
+- Blob container used as the Flex Consumption backend package store (`function-releases`)
 - Azure Table Storage table for ingestion state control
 - System-assigned managed identity for the shared Function App
 - RBAC assignment on Lakehouse ADLS: `Storage Blob Data Contributor`

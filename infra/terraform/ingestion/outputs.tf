@@ -1,11 +1,11 @@
 output "function_app_name" {
   description = "Shared ingestion Function App name."
-  value       = azurerm_linux_function_app.ingestion.name
+  value       = azurerm_function_app_flex_consumption.ingestion.name
 }
 
 output "function_app_principal_id" {
   description = "System-assigned managed identity principal ID for Function App."
-  value       = azurerm_linux_function_app.ingestion.identity[0].principal_id
+  value       = azurerm_function_app_flex_consumption.ingestion.identity[0].principal_id
 }
 
 output "function_storage_account_name" {

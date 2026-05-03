@@ -35,7 +35,7 @@ variable "state_table_name" {
 
 variable "app_service_plan_name" {
   type        = string
-  description = "App Service Plan name for Azure Functions."
+  description = "App Service Plan name for Azure Functions (Flex Consumption SKU FC1)."
   default     = "asp-legisflow-dev-functions"
 }
 
