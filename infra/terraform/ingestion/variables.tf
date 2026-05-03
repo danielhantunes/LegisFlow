@@ -33,6 +33,18 @@ variable "state_table_name" {
   default     = "IngestionState"
 }
 
+variable "control_api_table_name" {
+  type        = string
+  description = "Table Storage for CEAP API 2026 per-unit control (logical model: ingestion_control_api_2026). Azure allows alphanumeric only."
+  default     = "IngestionControlApi2026"
+}
+
+variable "ceap_api_queue_name" {
+  type        = string
+  description = "Queue name for CEAP API 2026 work messages (main queue)."
+  default     = "ceap-api-2026-work"
+}
+
 variable "app_service_plan_name" {
   type        = string
   description = "App Service Plan name for Azure Functions (Flex Consumption SKU FC1)."

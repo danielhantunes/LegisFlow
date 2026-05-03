@@ -1,0 +1,19 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "RAW_STORAGE_ACCOUNT_NAME": "<adls-account-name>",
+    "INGESTION_STATE_TABLE": "IngestionState",
+    "INGESTION_CONTROL_TABLE": "IngestionControlApi2026",
+    "CEAP_API_QUEUE_NAME": "ceap-api-2026-work",
+    "CEAP_API_POISON_QUEUE_NAME": "ceap-api-2026-work-poison",
+    "CEAP_API_2026_DISPATCH_SCHEDULE": "0 */5 * * * *",
+    "CEAP_TIMER_SCHEDULE": "0 */5 * * * *",
+    "CEAP_API_YEAR": "2026",
+    "CEAP_DISPATCH_MAX_MESSAGES": "50",
+    "CEAP_LEGACY_MONOLITH_ENABLED": "false",
+    "AzureWebJobs.ceap_expenses_ingestion_timer.Disabled": "true",
+    "MAX_RETRY_ATTEMPTS": "3"
+  }
+}

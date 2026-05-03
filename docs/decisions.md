@@ -99,3 +99,24 @@ The MVP uses a single dev environment with stable resource names. Requiring GitH
 - Faster onboarding and simpler CI/CD setup.
 - Lower risk of misconfigured repository variables.
 - Less flexibility for resource renaming until multi-environment hardening phase.
+
+## ADR-005 - CEAP API 2026 ingestion via queue and unit control table
+
+- **Date**: 2026-05-03
+- **Status**: Accepted
+
+### Context
+
+CEAP despesas per deputy can paginate heavily. A single timer execution that processes all deputies and months risks timeouts and poor fault isolation.
+
+### Decision
+
+- Use a **timer dispatcher** that enqueues bounded batches of work messages (`deputado` + `ano=2026` + `mes`).
+- Use a **queue-triggered worker** for each unit, with **HTTP retry + queue retry**, checkpoints per page in a dedicated **Table Storage** control plane (`IngestionControlApi2026`), and **deterministic Raw paths** for idempotent replay.
+- Keep the **legacy monolithic timer** in the codebase but **disabled by default** for emergency fallback only.
+
+### Consequences
+
+- Higher operational clarity (poison queue, replay HTTP function, runbook).
+- Slightly more moving parts (queues, extra functions) than a single timer.
+- Bronze/Silver must still deduplicate semantically; documented separately from Raw immutability policy.

@@ -57,16 +57,11 @@ legisflow/
   README.md
   docs/
     architecture.md
-    data_discovery.md
-    source_mapping.md
-    ingestion_strategy.md
-    data_model.md
-    quality_rules.md
-    runbook_ceap.md
-    runbook_votacoes.md
     decisions.md
-  diagrams/
-    architecture.drawio
+    runbooks/
+      ceap_api_ingestion_2026.md
+    pipelines/
+      ceap_deduplication_bronze_silver.md
   infra/
     terraform/
       bootstrap-tfstate/
@@ -74,8 +69,12 @@ legisflow/
       ingestion/
       databricks/
   functions/
-    ceap_ingestion/
+    ceap_expenses_ingestion_timer/
       shared/
+      ceap_api_2026_dispatcher/
+      ceap_api_2026_worker/
+      ceap_api_2026_poison_handler/
+      fn_replay_ceap_failed_messages/
     votacoes_microbatch/
   databricks/
     notebooks/
@@ -106,7 +105,7 @@ legisflow/
 2. Terraform bootstrap for remote state
 3. Base Terraform (resource group, ADLS, observability, identities)
 4. Ingestion Terraform (Function App, storage, state services)
-5. CEAP ingestion Azure Function with state control and idempotency
+5. CEAP API 2026 ingestion (dispatcher + queue worker + control table + replay HTTP) and idempotent Raw paths
 6. Databricks Bronze/Silver/Gold pipelines
 7. Data quality rules and tests
 8. Databricks jobs and deployment automation

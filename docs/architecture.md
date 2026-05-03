@@ -40,14 +40,13 @@ The architecture uses separate resource groups for workload and Terraform backen
 
 ## 5) End-to-End Data Flow
 
-1. Timer-triggered CEAP function (`ceap_expenses_ingestion_timer`) starts ingestion run.
-2. Function ingests deputies first from API and writes raw payloads.
-3. Function builds the eligible deputy list dynamically (no fixed list of 513).
-4. Function creates/updates expense partitions by `deputado_id x ano x mes`.
-5. Function processes partitions with retry, lock, and status tracking.
-6. Raw payloads are stored in ADLS with run/execution metadata in path.
-7. When all partitions complete, Function triggers Databricks processing job.
-8. Databricks jobs materialize Bronze -> Silver -> Gold Delta layers.
+1. **CEAP API 2026 (MVP atual)**: timer `ceap_api_2026_dispatcher` enfileira unidades pequenas (`deputado_id` + `ano=2026` + `mes`) na fila `ceap-api-2026-work` (lote limitado por execução para evitar timeout).
+2. **Worker** `ceap_api_2026_worker` processa uma mensagem de cada vez: paginação da API com retry HTTP, checkpoint por página na tabela `IngestionControlApi2026` (modelo lógico ingestion_control_api_2026), escrita idempotente em ADLS Raw em caminho determinístico (`ano=2026/mes=MM/deputado_id=.../page=NNNN/response.json`).
+3. **Poison** `ceap-api-2026-work-poison` + função `ceap_api_2026_poison_handler` marcam unidades com falha persistente após retries da fila.
+4. **Replay** HTTP `fn_replay_ceap_failed_messages` reenfileira unidades por filtros (`statuses`, `id_deputado`, `mes`, `full`, etc.). Runbook: `docs/runbooks/ceap_api_ingestion_2026.md`.
+5. **Histórico 2019–2025**: ficheiros estáticos (fora deste fluxo API).
+6. **Legado desativado**: `ceap_expenses_ingestion_timer` monolítico permanece no pacote mas desativado por predefinição (`AzureWebJobs...Disabled` + `CEAP_LEGACY_MONOLITH_ENABLED=false`); só para emergência.
+7. Databricks jobs materializam Bronze → Silver → Gold Delta layers; deduplicação CEAP API descrita em `docs/pipelines/ceap_deduplication_bronze_silver.md`.
 
 ## 6) Layering Strategy (Lakehouse)
 

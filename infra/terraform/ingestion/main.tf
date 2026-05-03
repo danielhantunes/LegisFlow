@@ -16,6 +16,7 @@ locals {
     0,
     24
   )
+  ceap_api_poison_queue_name = "${var.ceap_api_queue_name}-poison"
 }
 
 resource "azurerm_storage_account" "function" {
@@ -42,6 +43,21 @@ resource "azurerm_storage_container" "function_package" {
 
 resource "azurerm_storage_table" "state" {
   name                 = var.state_table_name
+  storage_account_name = azurerm_storage_account.function.name
+}
+
+resource "azurerm_storage_table" "control_api_2026" {
+  name                 = var.control_api_table_name
+  storage_account_name = azurerm_storage_account.function.name
+}
+
+resource "azurerm_storage_queue" "ceap_api_work" {
+  name                 = var.ceap_api_queue_name
+  storage_account_name = azurerm_storage_account.function.name
+}
+
+resource "azurerm_storage_queue" "ceap_api_poison" {
+  name                 = local.ceap_api_poison_queue_name
   storage_account_name = azurerm_storage_account.function.name
 }
 
@@ -90,6 +106,14 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "WEBSITE_RUN_FROM_PACKAGE" = "1"
     "CEAP_TIMER_SCHEDULE"      = var.ceap_timer_schedule
     "INGESTION_STATE_TABLE"    = azurerm_storage_table.state.name
+    "INGESTION_CONTROL_TABLE"  = azurerm_storage_table.control_api_2026.name
+    "CEAP_API_QUEUE_NAME"      = azurerm_storage_queue.ceap_api_work.name
+    "CEAP_API_POISON_QUEUE_NAME" = azurerm_storage_queue.ceap_api_poison.name
+    "CEAP_API_2026_DISPATCH_SCHEDULE" = var.ceap_timer_schedule
+    "CEAP_API_YEAR"            = "2026"
+    "CEAP_DISPATCH_MAX_MESSAGES" = "100"
+    "CEAP_LEGACY_MONOLITH_ENABLED" = "false"
+    "AzureWebJobs.ceap_expenses_ingestion_timer.Disabled" = "true"
     "RAW_STORAGE_ACCOUNT_NAME" = var.lakehouse_storage_account_name
     "MAX_RETRY_ATTEMPTS"       = tostring(var.max_retry_attempts)
   }
