@@ -87,7 +87,6 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
 
   app_settings = {
     "FUNCTIONS_EXTENSION_VERSION" = "~4"
-    "FUNCTIONS_WORKER_RUNTIME" = "python"
     "WEBSITE_RUN_FROM_PACKAGE" = "1"
     "CEAP_TIMER_SCHEDULE"      = var.ceap_timer_schedule
     "INGESTION_STATE_TABLE"    = azurerm_storage_table.state.name
