@@ -71,8 +71,7 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
   runtime_name    = "python"
   runtime_version = "3.11"
 
-  functions_extension_version = "~4"
-  https_only                  = true
+  https_only = true
 
   maximum_instance_count = 50
   instance_memory_in_mb  = 2048
@@ -80,7 +79,6 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
   site_config {
     application_insights_key               = data.azurerm_application_insights.main.instrumentation_key
     application_insights_connection_string = data.azurerm_application_insights.main.connection_string
-    ftps_state                             = "Disabled"
   }
 
   identity {
@@ -88,6 +86,7 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
   }
 
   app_settings = {
+    "FUNCTIONS_EXTENSION_VERSION" = "~4"
     "FUNCTIONS_WORKER_RUNTIME" = "python"
     "WEBSITE_RUN_FROM_PACKAGE" = "1"
     "CEAP_TIMER_SCHEDULE"      = var.ceap_timer_schedule
