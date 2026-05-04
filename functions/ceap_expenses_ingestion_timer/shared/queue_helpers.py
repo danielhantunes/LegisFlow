@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+from azure.core.exceptions import ResourceExistsError
 from azure.storage.queue import QueueClient, QueueServiceClient
 
 
@@ -9,7 +10,11 @@ def get_queue_client(queue_name: str) -> QueueClient:
     conn = os.environ["AzureWebJobsStorage"]
     qss = QueueServiceClient.from_connection_string(conn)
     client = qss.get_queue_client(queue_name)
-    client.create_queue()
+    try:
+        client.create_queue()
+    except ResourceExistsError:
+        # Idempotent creation: queue may already exist from Terraform/provisioning.
+        pass
     return client
 
 
