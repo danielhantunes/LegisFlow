@@ -39,7 +39,7 @@ Restaurar a ingestão resiliente de despesas CEAP via API da Câmara (Dados Aber
 
 - Storage Account da **Function App** (conta dedicada às funções, não o ADLS): **Tables** → `IngestionControlApi2026`.
 - Partição das unidades: `ceap`; `RowKey` ≈ `{ano}_{mes}_{id_deputado}`.
-- Cursor do dispatcher: partição `_dispatch`, linha `ceap_api_2026` (`next_pagina`, `next_idx`, `next_mes`).
+- Cursor do dispatcher: partição `_dispatch`, linha `ceap_api_2026` (`next_pagina`, `next_idx`, `next_month_idx` — índice na lista ordenada de meses até ao mês corrente, sem meses futuros).
 
 ### Identificar `failed`
 

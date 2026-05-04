@@ -74,26 +74,32 @@ class IngestionControlApi2026Store:
 
     def get_dispatch_cursor(self) -> dict[str, Any]:
         try:
-            return self.table_client.get_entity(
-                partition_key=self.PARTITION_DISPATCH, row_key=self.ROW_DISPATCH_CURSOR
+            ent = dict(
+                self.table_client.get_entity(
+                    partition_key=self.PARTITION_DISPATCH, row_key=self.ROW_DISPATCH_CURSOR
+                )
             )
+            # Older cursors used next_mes (calendar month). Month order is now list-based.
+            if "next_month_idx" not in ent:
+                ent["next_month_idx"] = 0
+            return ent
         except ResourceNotFoundError:
             return {
                 "PartitionKey": self.PARTITION_DISPATCH,
                 "RowKey": self.ROW_DISPATCH_CURSOR,
                 "next_pagina": 1,
                 "next_idx": 0,
-                "next_mes": 1,
+                "next_month_idx": 0,
             }
 
-    def save_dispatch_cursor(self, *, next_pagina: int, next_idx: int, next_mes: int) -> None:
+    def save_dispatch_cursor(self, *, next_pagina: int, next_idx: int, next_month_idx: int) -> None:
         self.table_client.upsert_entity(
             entity={
                 "PartitionKey": self.PARTITION_DISPATCH,
                 "RowKey": self.ROW_DISPATCH_CURSOR,
                 "next_pagina": next_pagina,
                 "next_idx": next_idx,
-                "next_mes": next_mes,
+                "next_month_idx": next_month_idx,
                 "updated_at": _utc_now_iso(),
             },
             mode="merge",
