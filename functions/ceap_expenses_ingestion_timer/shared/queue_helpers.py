@@ -6,8 +6,13 @@ from azure.core.exceptions import ResourceExistsError
 from azure.storage.queue import QueueClient, QueueServiceClient
 
 
+def _queue_storage_connection_string() -> str:
+    """Prefer dedicated setting used by queue triggers; fall back to host storage."""
+    return os.getenv("CEAP_QUEUE_STORAGE") or os.environ["AzureWebJobsStorage"]
+
+
 def get_queue_client(queue_name: str) -> QueueClient:
-    conn = os.environ["AzureWebJobsStorage"]
+    conn = _queue_storage_connection_string()
     qss = QueueServiceClient.from_connection_string(conn)
     client = qss.get_queue_client(queue_name)
     try:

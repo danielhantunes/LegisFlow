@@ -19,6 +19,7 @@ Restaurar a ingestão resiliente de despesas CEAP via API da Câmara (Dados Aber
 | `fn_replay_ceap_failed_messages` | HTTP (`authLevel=function`): reenfileira unidades por filtros (`statuses`, `id_deputado`, `ano`, `mes`, `full`). |
 | Tabela `IngestionControlApi2026` | Modelo lógico **ingestion_control_api_2026** (nome físico alfanumérico por restrição do Azure). |
 | Filas `ceap-api-2026-work` e `ceap-api-2026-work-poison` | Distribuição de trabalho e isolamento de falhas persistentes. |
+| App setting `CEAP_QUEUE_STORAGE` | Connection string explícita da storage da Function App; usada pelos **queue triggers** (worker/poison) para o listener do host no Flex Consumption. |
 | Application Insights | Telemetria e logs JSON estruturados (`execution_id`, `id_deputado`, `mes`, página, etc.). |
 
 ## Sintomas de falha

@@ -103,6 +103,9 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
 
   app_settings = {
     "FUNCTIONS_EXTENSION_VERSION" = "~4"
+    # Explicit storage connection for Queue triggers (worker/poison). Flex host may not
+    # wire queue listeners to the same credential shape as AzureWebJobsStorage alone.
+    "CEAP_QUEUE_STORAGE"       = azurerm_storage_account.function.primary_connection_string
     "CEAP_TIMER_SCHEDULE"      = var.ceap_timer_schedule
     "INGESTION_STATE_TABLE"    = azurerm_storage_table.state.name
     "INGESTION_CONTROL_TABLE"  = azurerm_storage_table.control_api_2026.name
