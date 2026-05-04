@@ -11,7 +11,6 @@ import os
 from datetime import UTC, datetime
 
 import azure.functions as func
-from azure.data.tables import TableServiceClient
 
 from shared.adls_writer import AdlsRawWriter
 from shared.api_client import CamaraApiClient
@@ -203,6 +202,4 @@ def _build_state_store() -> IngestionStateStore:
     if not conn_str:
         raise RuntimeError("AzureWebJobsStorage is required to use ingestion state table.")
     table_name = os.getenv("INGESTION_STATE_TABLE", "IngestionState")
-    table_service = TableServiceClient.from_connection_string(conn_str=conn_str)
-    table_client = table_service.get_table_client(table_name=table_name)
-    return IngestionStateStore(table_client=table_client)
+    return IngestionStateStore.from_connection_string(conn_str=conn_str, table_name=table_name)

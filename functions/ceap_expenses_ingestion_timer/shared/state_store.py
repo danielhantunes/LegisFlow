@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from azure.core.exceptions import ResourceNotFoundError
-from azure.data.tables import TableClient
+from azure.data.tables import TableClient, TableServiceClient
 
 
 @dataclass
@@ -20,7 +20,12 @@ class PartitionState:
 class IngestionStateStore:
     def __init__(self, table_client: TableClient) -> None:
         self.table_client = table_client
-        self.table_client.create_table_if_not_exists()
+
+    @classmethod
+    def from_connection_string(cls, conn_str: str, table_name: str) -> IngestionStateStore:
+        tsc = TableServiceClient.from_connection_string(conn_str)
+        tsc.create_table_if_not_exists(table_name=table_name)
+        return cls(tsc.get_table_client(table_name=table_name))
 
     def acquire_lock(self, lock_name: str, execution_id: str, ttl_minutes: int = 30) -> bool:
         now = datetime.now(timezone.utc)

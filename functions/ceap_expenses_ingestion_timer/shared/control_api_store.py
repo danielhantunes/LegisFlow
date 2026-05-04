@@ -40,11 +40,11 @@ class IngestionControlApi2026Store:
 
     def __init__(self, table_client: TableClient) -> None:
         self.table_client = table_client
-        self.table_client.create_table_if_not_exists()
 
     @classmethod
     def from_connection_string(cls, conn_str: str, table_name: str) -> IngestionControlApi2026Store:
         tsc = TableServiceClient.from_connection_string(conn_str)
+        tsc.create_table_if_not_exists(table_name=table_name)
         return cls(tsc.get_table_client(table_name=table_name))
 
     def get_unit(self, ano: int, mes: int, id_deputado: int) -> dict[str, Any] | None:
