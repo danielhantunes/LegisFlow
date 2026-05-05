@@ -13,6 +13,7 @@
     "CEAP_TIMER_SCHEDULE": "0 */5 * * * *",
     "CEAP_API_YEAR": "2026",
     "CEAP_DISPATCH_MAX_MESSAGES": "50",
+    "CEAP_STALE_AFTER_MINUTES": "60",
     "CEAP_LEGACY_MONOLITH_ENABLED": "false",
     "AzureWebJobs.ceap_expenses_ingestion_timer.Disabled": "true",
     "MAX_RETRY_ATTEMPTS": "3"

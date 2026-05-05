@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import azure.functions as func
@@ -42,14 +42,62 @@ def _deputados_total_hint(payload: dict[str, Any] | None, itens_per_page: int = 
     return None
 
 
-def _should_enqueue_partition(part: dict | None, pipeline_run_id: str) -> bool:
+def _parse_iso_utc(raw: Any) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _partition_enqueue_action(
+    *,
+    part: dict[str, Any] | None,
+    pipeline_run_id: str,
+    now: datetime,
+    stale_after_minutes: int,
+) -> str:
+    """
+    Returns one of:
+      - enqueue_new
+      - enqueue_reprocess
+      - enqueue_stale_queued
+      - enqueue_stale_running
+      - skip_success_same_run
+      - skip_queued
+      - skip_running
+    """
     if part is None:
-        return True
+        return "enqueue_new"
+
     st = str(part.get("status", "")).upper()
     cur = str(part.get("current_pipeline_run_id", ""))
-    if cur == pipeline_run_id and st in ("QUEUED", "RUNNING", "SUCCESS"):
-        return False
-    return True
+    stale_before = now - timedelta(minutes=stale_after_minutes)
+
+    if st in ("PENDING", "FAILED", "POISON", "STALE"):
+        return "enqueue_reprocess"
+
+    if cur == pipeline_run_id and st == "SUCCESS":
+        return "skip_success_same_run"
+
+    if st == "QUEUED":
+        dispatched = _parse_iso_utc(part.get("last_dispatched_at"))
+        if dispatched is not None and dispatched < stale_before:
+            return "enqueue_stale_queued"
+        return "skip_queued"
+
+    if st == "RUNNING":
+        started = _parse_iso_utc(part.get("last_started_at"))
+        if started is not None and started < stale_before:
+            return "enqueue_stale_running"
+        return "skip_running"
+
+    # For unknown/empty states, prefer re-enqueue.
+    return "enqueue_reprocess"
 
 
 def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
@@ -63,6 +111,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     recon_day = int(os.getenv("CEAP_RECONCILIATION_DAY", "25"))
     lookback = int(os.getenv("CEAP_DAILY_LOOKBACK_MONTHS", "1"))
     start_month = int(os.getenv("CEAP_RECONCILIATION_START_MONTH", "1"))
+    stale_after_minutes = int(os.getenv("CEAP_STALE_AFTER_MINUTES", "60"))
     max_per_tick = int(
         os.getenv("CEAP_MAX_TASKS_PER_DISPATCH", os.getenv("CEAP_DISPATCH_MAX_MESSAGES", "1000"))
     )
@@ -148,7 +197,10 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
 
     queued_this_tick = 0
     skipped_already_queued = 0
-    skipped_already_completed = 0
+    skipped_already_running = 0
+    skipped_success_same_run = 0
+    stale_queued_reenqueued = 0
+    stale_running_reenqueued = 0
     skipped_future_months = 0
 
     try:
@@ -223,13 +275,17 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                         continue
 
                     part = parts.get_partition(dep_id, target_year, mes)
-                    if not _should_enqueue_partition(part, pipeline_run_id):
-                        if (
-                            part
-                            and str(part.get("current_pipeline_run_id", "")) == pipeline_run_id
-                            and str(part.get("status", "")).upper() == "SUCCESS"
-                        ):
-                            skipped_already_completed += 1
+                    action = _partition_enqueue_action(
+                        part=part,
+                        pipeline_run_id=pipeline_run_id,
+                        now=now,
+                        stale_after_minutes=stale_after_minutes,
+                    )
+                    if action.startswith("skip_"):
+                        if action == "skip_success_same_run":
+                            skipped_success_same_run += 1
+                        elif action == "skip_running":
+                            skipped_already_running += 1
                         else:
                             skipped_already_queued += 1
                         month_idx += 1
@@ -248,6 +304,24 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     send_json_message(queue_name, wm.to_json())
 
                     prev_pid = str(part.get("current_pipeline_run_id", "")) if part else ""
+                    stale_requeue_count = int(part.get("stale_requeue_count", 0) or 0) if part else 0
+                    reprocess_count = int(part.get("reprocess_count", 0) or 0) if part else 0
+                    if action == "enqueue_stale_queued":
+                        stale_queued_reenqueued += 1
+                        if part and "stale_requeue_count" in part:
+                            stale_requeue_count += 1
+                        elif part and "reprocess_count" in part:
+                            reprocess_count += 1
+                        else:
+                            stale_requeue_count = 1
+                    elif action == "enqueue_stale_running":
+                        stale_running_reenqueued += 1
+                        if part and "stale_requeue_count" in part:
+                            stale_requeue_count += 1
+                        elif part and "reprocess_count" in part:
+                            reprocess_count += 1
+                        else:
+                            stale_requeue_count = 1
                     parts.upsert_partition(
                         {
                             "id_deputado": dep_id,
@@ -259,6 +333,8 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                             "current_pipeline_run_id": pipeline_run_id,
                             "last_pipeline_run_id": prev_pid,
                             "last_dispatched_at": dispatched_at,
+                            "stale_requeue_count": stale_requeue_count,
+                            "reprocess_count": reprocess_count,
                             "attempt_count": int(part.get("attempt_count", 0) or 0) if part else 0,
                         }
                     )
@@ -349,8 +425,11 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             total_tasks_expected=total_tasks_expected,
             total_tasks_queued=total_queued,
             messages_enqueued=queued_this_tick,
-            skipped_already_completed=skipped_already_completed,
+            stale_queued_reenqueued=stale_queued_reenqueued,
+            stale_running_reenqueued=stale_running_reenqueued,
             skipped_already_queued=skipped_already_queued,
+            skipped_already_running=skipped_already_running,
+            skipped_success_same_run=skipped_success_same_run,
             skipped_future_months=skipped_future_months,
             lock_acquired=True,
             idle_enqueue_ticks=idle_ticks,

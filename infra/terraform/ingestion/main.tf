@@ -116,6 +116,7 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "CEAP_TARGET_YEAR"         = "2026"
     "CEAP_RECONCILIATION_DAY"  = "25"
     "CEAP_DAILY_LOOKBACK_MONTHS" = "1"
+    "CEAP_STALE_AFTER_MINUTES" = "60"
     "CEAP_RECONCILIATION_START_MONTH" = "1"
     "CEAP_MAX_TASKS_PER_DISPATCH" = "1000"
     "CEAP_DISPATCH_MAX_MESSAGES" = "1000"

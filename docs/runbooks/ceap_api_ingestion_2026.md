@@ -45,6 +45,7 @@ O dispatcher usa **lock** na tabela de controlo (`PartitionKey=_locks`, `RowKey=
 | `CEAP_API_2026_DISPATCH_SCHEDULE` | CRON do dispatcher (default `0 */20 * * * *`). |
 | `CEAP_RECONCILIATION_DAY` | Dia UTC dedicado à reconciliação mensual (default 25). |
 | `CEAP_DAILY_LOOKBACK_MONTHS` | Quantos meses para trás incluir na janela daily (default 1). |
+| `CEAP_STALE_AFTER_MINUTES` | Janela para considerar `QUEUED`/`RUNNING` como órfãos (default 60; em dev pode usar 5 para teste rápido). |
 | `CEAP_RECONCILIATION_START_MONTH` | Primeiro mês na reconciliação (default 1). |
 | `CEAP_MAX_TASKS_PER_DISPATCH` | Limite de mensagens criadas por execução do dispatcher (default recomendado 1000). |
 | `CEAP_API_QUEUE_NAME` / `CEAP_API_POISON_QUEUE_NAME` | Nomes das filas. |
