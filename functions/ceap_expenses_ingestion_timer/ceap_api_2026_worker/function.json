@@ -6,7 +6,7 @@
       "type": "queueTrigger",
       "direction": "in",
       "queueName": "%CEAP_API_QUEUE_NAME%",
-      "connection": "CEAP_QUEUE_STORAGE"
+      "connection": "AzureWebJobsStorage"
     }
   ]
 }

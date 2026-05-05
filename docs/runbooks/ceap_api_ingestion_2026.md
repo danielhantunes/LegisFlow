@@ -33,7 +33,8 @@ O dispatcher usa **lock** na tabela de controlo (`PartitionKey=_locks`, `RowKey=
 | `IngestionState` | Partição **`ceap_2026`**; `RowKey` = `despesas\|{id_deputado}\|{ano}\|{mes}`. Estados típicos: `QUEUED`, `RUNNING`, `SUCCESS`, `FAILED`, `POISON`, etc. |
 | `IngestionControlApi2026` | **`_runs`**: controlo por `pipeline_run_id` (contadores, cursores do dispatcher, `enqueue_phase_complete`). **`_locks`**: lock do dispatcher. |
 | Filas `ceap-api-2026-work` e `ceap-api-2026-work-poison` | Trabalho e falhas persistentes após retries (`host.json` / `maxDequeueCount`). |
-| `CEAP_QUEUE_STORAGE` | Connection string explícita da storage da Function App; usada pelos **queue triggers** no Flex Consumption. |
+| `AzureWebJobsStorage` | Connection string principal da Function App; usada pelos **queue triggers** (`ceap_api_2026_worker` e `ceap_api_2026_poison_handler`). |
+| `CEAP_QUEUE_STORAGE` | Opcional para clientes de fila no código (dispatcher/replay); os listeners de trigger usam `AzureWebJobsStorage`. |
 | Application Insights | Logs JSON estruturados (`execution_id`, `pipeline_run_id`, `mode`, `id_deputado`, `mes`, `raw_path`, etc.). |
 
 ### App settings relevantes (resumo)
