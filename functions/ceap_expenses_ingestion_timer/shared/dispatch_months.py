@@ -49,3 +49,41 @@ def dispatch_month_order(*, target_year: int, now: datetime | None = None) -> li
                 preferred.append(prev_same_year)
     rest = [m for m in range(1, max_m + 1) if m not in preferred]
     return preferred + rest
+
+
+def months_daily_moving_window(
+    *, target_year: int, now: datetime, lookback_months: int
+) -> list[int]:
+    """
+    Daily mode: "current" month within target_year plus lookback, never beyond max_dispatch_month.
+
+    - Same calendar year as target_year: anchor at today's month.
+    - Target year in the past (e.g. 2025 while clock is 2026): anchor at last dispatchable
+      month for that year (typically December) so the window still moves along the year tail.
+    """
+    max_m = max_dispatch_month(target_year=target_year, now=now)
+    if max_m < 1:
+        return []
+    if target_year > now.year:
+        return []
+    if target_year == now.year:
+        cm = now.month
+    else:
+        cm = max_m
+    out: list[int] = []
+    for i in range(lookback_months + 1):
+        m = cm - i
+        if 1 <= m <= max_m:
+            out.append(m)
+    return out
+
+
+def months_reconciliation_window(
+    *, target_year: int, now: datetime, start_month: int
+) -> list[int]:
+    """Reconciliation: January (or start_month) through max_dispatch_month."""
+    max_m = max_dispatch_month(target_year=target_year, now=now)
+    if max_m < 1:
+        return []
+    sm = max(1, min(12, int(start_month)))
+    return list(range(sm, max_m + 1))
