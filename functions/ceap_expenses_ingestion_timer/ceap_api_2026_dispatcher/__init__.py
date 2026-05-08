@@ -115,7 +115,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     start_month = int(os.getenv("CEAP_RECONCILIATION_START_MONTH", "1"))
     stale_after_minutes = int(os.getenv("CEAP_STALE_AFTER_MINUTES", "60"))
     max_per_tick = int(
-        os.getenv("CEAP_MAX_TASKS_PER_DISPATCH", os.getenv("CEAP_DISPATCH_MAX_MESSAGES", "1000"))
+        os.getenv("CEAP_MAX_TASKS_PER_DISPATCH", os.getenv("CEAP_DISPATCH_MAX_MESSAGES", "100"))
     )
 
     max_m = max_dispatch_month(target_year=target_year, now=now)
@@ -206,13 +206,37 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     skipped_future_months = 0
 
     try:
+        log_structured(
+            logger,
+            "info",
+            "[BEFORE_RUN_REFRESH]",
+            pipeline_run_id=pipeline_run_id,
+            mode=mode,
+        )
         run = registry.get_run(pipeline_run_id)
+        log_structured(
+            logger,
+            "info",
+            "[AFTER_RUN_REFRESH]",
+            pipeline_run_id=pipeline_run_id,
+            mode=mode,
+            run_found=bool(run),
+            run_status=str((run or {}).get("status", "")),
+        )
         if run and str(run.get("status", "")).upper() == "COMPLETED":
             return
         if run and bool(run.get("enqueue_phase_complete")):
             return
 
         if not run:
+            log_structured(
+                logger,
+                "info",
+                "[BEFORE_FINAL_UPSERT]",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                upsert_stage="initialize_run",
+            )
             registry.upsert_run(
                 {
                     "pipeline_run_id": pipeline_run_id,
@@ -231,6 +255,14 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     "idle_enqueue_ticks": 0,
                     "enqueue_phase_complete": False,
                 }
+            )
+            log_structured(
+                logger,
+                "info",
+                "[AFTER_FINAL_UPSERT]",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                upsert_stage="initialize_run",
             )
 
         run = registry.get_run(pipeline_run_id) or {}
@@ -392,12 +424,44 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             if remaining == 0:
                 break
 
+        log_structured(
+            logger,
+            "info",
+            "[AFTER_ENQUEUE_LOOP]",
+            pipeline_run_id=pipeline_run_id,
+            mode=mode,
+            queued_this_tick=queued_this_tick,
+            total_queued=total_queued,
+            remaining=remaining,
+            pagina=pagina,
+            idx=idx,
+            month_idx=month_idx,
+        )
+
         if queued_this_tick == 0:
             idle_ticks += 1
         else:
             idle_ticks = 0
 
+        log_structured(
+            logger,
+            "info",
+            "[BEFORE_RUN_REFRESH]",
+            pipeline_run_id=pipeline_run_id,
+            mode=mode,
+            refresh_stage="post_enqueue",
+        )
         run_refresh = registry.get_run(pipeline_run_id) or {}
+        log_structured(
+            logger,
+            "info",
+            "[AFTER_RUN_REFRESH]",
+            pipeline_run_id=pipeline_run_id,
+            mode=mode,
+            refresh_stage="post_enqueue",
+            run_status=str(run_refresh.get("status", "")),
+            enqueue_phase_complete=bool(run_refresh.get("enqueue_phase_complete")),
+        )
         enqueue_complete = bool(run_refresh.get("enqueue_phase_complete"))
         total_tasks_expected = int(run_refresh.get("total_tasks_expected", 0) or 0)
 
@@ -408,6 +472,16 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
 
         if enqueue_complete and total_queued == 0:
             run_status = "COMPLETED"
+            log_structured(
+                logger,
+                "info",
+                "[BEFORE_FINAL_UPSERT]",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                upsert_stage="final_completed",
+                idle_ticks=idle_ticks,
+                total_tasks_queued=total_queued,
+            )
             registry.upsert_run(
                 {
                     "pipeline_run_id": pipeline_run_id,
@@ -420,7 +494,27 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     "last_error": "",
                 }
             )
+            log_structured(
+                logger,
+                "info",
+                "[AFTER_FINAL_UPSERT]",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                upsert_stage="final_completed",
+            )
         else:
+            log_structured(
+                logger,
+                "info",
+                "[BEFORE_FINAL_UPSERT]",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                upsert_stage="final_queueing_or_queued",
+                idle_ticks=idle_ticks,
+                enqueue_phase_complete=enqueue_complete,
+                total_tasks_expected=total_tasks_expected,
+                total_tasks_queued=total_queued,
+            )
             registry.upsert_run(
                 {
                     "pipeline_run_id": pipeline_run_id,
@@ -432,8 +526,33 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     "last_error": "",
                 }
             )
+            log_structured(
+                logger,
+                "info",
+                "[AFTER_FINAL_UPSERT]",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                upsert_stage="final_queueing_or_queued",
+            )
 
+        log_structured(
+            logger,
+            "info",
+            "[BEFORE_RUN_REFRESH]",
+            pipeline_run_id=pipeline_run_id,
+            mode=mode,
+            refresh_stage="final_status",
+        )
         run_done = registry.get_run(pipeline_run_id) or {}
+        log_structured(
+            logger,
+            "info",
+            "[AFTER_RUN_REFRESH]",
+            pipeline_run_id=pipeline_run_id,
+            mode=mode,
+            refresh_stage="final_status",
+            run_status=str(run_done.get("status", "")),
+        )
         final_status = str(run_done.get("status", ""))
         total_deputados = _deputados_total_hint(hint_payload)
 
@@ -464,8 +583,87 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             next_month_idx=month_idx,
             final_status=final_status,
         )
+        log_structured(
+            logger,
+            "info",
+            "[DISPATCH_TICK_FINISHED]",
+            pipeline_run_id=pipeline_run_id,
+            mode=mode,
+            queued_this_tick=queued_this_tick,
+            total_queued=total_queued,
+            remaining=remaining,
+            pagina=pagina,
+            idx=idx,
+            month_idx=month_idx,
+            idle_ticks=idle_ticks,
+            enqueue_phase_complete=enqueue_complete,
+            final_status=final_status,
+        )
+    except Exception as e:
+        log_structured(
+            logger,
+            "error",
+            "CEAP dispatcher failed.",
+            pipeline_run_id=pipeline_run_id,
+            mode=mode,
+            error=str(e),
+            error_type=type(e).__name__,
+            queued_this_tick=queued_this_tick,
+            total_queued=locals().get("total_queued", 0),
+            remaining=locals().get("remaining"),
+        )
+        try:
+            log_structured(
+                logger,
+                "info",
+                "[BEFORE_FINAL_UPSERT]",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                upsert_stage="failed_exception",
+            )
+            registry.upsert_run(
+                {
+                    "pipeline_run_id": pipeline_run_id,
+                    "status": "FAILED",
+                    "last_error": f"{type(e).__name__}: {str(e)}",
+                    "failed_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            log_structured(
+                logger,
+                "info",
+                "[AFTER_FINAL_UPSERT]",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                upsert_stage="failed_exception",
+            )
+        except Exception as upsert_error:
+            log_structured(
+                logger,
+                "error",
+                "Failed to upsert FAILED state for dispatcher run.",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                error=str(upsert_error),
+                error_type=type(upsert_error).__name__,
+            )
+        raise
     finally:
+        log_structured(
+            logger,
+            "info",
+            "[BEFORE_RELEASE_LOCK]",
+            pipeline_run_id=pipeline_run_id,
+            mode=mode,
+        )
         registry.release_dispatcher_lock(lock_token)
+        log_structured(
+            logger,
+            "info",
+            "[AFTER_RELEASE_LOCK]",
+            pipeline_run_id=pipeline_run_id,
+            mode=mode,
+        )
         snap = registry.get_run(pipeline_run_id) or {}
         log_structured(
             logger,

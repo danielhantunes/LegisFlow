@@ -118,8 +118,8 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "CEAP_DAILY_LOOKBACK_MONTHS" = "1"
     "CEAP_STALE_AFTER_MINUTES" = "60"
     "CEAP_RECONCILIATION_START_MONTH" = "1"
-    "CEAP_MAX_TASKS_PER_DISPATCH" = "1000"
-    "CEAP_DISPATCH_MAX_MESSAGES" = "1000"
+    "CEAP_MAX_TASKS_PER_DISPATCH" = "100"
+    "CEAP_DISPATCH_MAX_MESSAGES" = "100"
     "CEAP_LEGACY_MONOLITH_ENABLED" = "false"
     "AzureWebJobs.ceap_expenses_ingestion_timer.Disabled" = "true"
     "RAW_STORAGE_ACCOUNT_NAME" = var.lakehouse_storage_account_name
