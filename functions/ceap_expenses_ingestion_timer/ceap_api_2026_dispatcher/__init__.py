@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import azure.functions as func
 
+from shared.adls_writer import AdlsRawWriter
 from shared.api_client import CamaraApiClient
 from shared.ceap_partition_state import CeapPartitionStateStore
 from shared.ceap_run_registry import CeapRunRegistry
@@ -239,6 +241,8 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         idle_ticks = int(run.get("idle_enqueue_ticks", 0) or 0)
 
         api = CamaraApiClient()
+        raw_writer = AdlsRawWriter(account_name=os.environ["RAW_STORAGE_ACCOUNT_NAME"])
+        dispatch_execution_id = str(uuid.uuid4())
         remaining = max_per_tick
         hint_payload: dict[str, Any] | None = None
 
@@ -264,6 +268,27 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     pagina=pagina,
                 )
                 break
+
+            deputies_raw_path = (
+                "raw/camara/deputados/api/list/"
+                f"reference_date={now:%Y-%m-%d}/"
+                f"pipeline_run_id={pipeline_run_id}/"
+                f"execution_id={dispatch_execution_id}/"
+                f"page_{pagina}.json"
+            )
+            deputies_written = raw_writer.write_json(deputies_raw_path, payload)
+            log_structured(
+                logger,
+                "info",
+                "Deputies page persisted in raw.",
+                mode=mode,
+                pipeline_run_id=pipeline_run_id,
+                dispatch_execution_id=dispatch_execution_id,
+                page=pagina,
+                record_count=len(dados),
+                raw_path=deputies_written,
+                http_status=http_status,
+            )
 
             while idx < len(dados) and remaining > 0:
                 dep_id = int(dados[idx]["id"])

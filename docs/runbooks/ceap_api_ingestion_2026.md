@@ -70,6 +70,13 @@ raw/camara/ceap/api/despesas/reference_year={ano}/reference_month={MM}/
 
 Cada execução da função gera um **`execution_id`** novo; repetir a mesma competência noutro run produz prefixos distintos (sem sobrescrever blobs de outro run).
 
+O dispatcher também grava snapshots da listagem de deputados (fonte de dispatch e base para futura dimensão):
+
+```text
+raw/camara/deputados/api/list/reference_date={YYYY-MM-DD}/
+  pipeline_run_id={pipeline_run_id}/execution_id={dispatch_execution_id}/page_{n}.json
+```
+
 ## Consultar logs (Application Insights)
 
 1. Portal Azure → Function App (ex.: `func-legisflow-ingestion-dev`) → Application Insights → **Logs**.
