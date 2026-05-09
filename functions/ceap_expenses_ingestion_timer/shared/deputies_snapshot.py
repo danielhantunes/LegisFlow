@@ -20,6 +20,10 @@ def deputies_metadata_path(reference_date: str) -> str:
     return f"{deputies_date_dir(reference_date)}/metadata.json"
 
 
+def deputies_manifest_path(reference_date: str) -> str:
+    return f"{deputies_date_dir(reference_date)}/_metadata/run_summary.json"
+
+
 def deputies_success_path(reference_date: str) -> str:
     return f"{deputies_date_dir(reference_date)}/_SUCCESS"
 
@@ -30,26 +34,41 @@ def write_deputies_metadata(
     return adls.write_json(deputies_metadata_path(reference_date), summary)
 
 
+def write_deputies_manifest(
+    adls: AdlsRawWriter, reference_date: str, summary: dict[str, Any]
+) -> str:
+    return adls.write_json(deputies_manifest_path(reference_date), summary)
+
+
 def write_deputies_success_marker(adls: AdlsRawWriter, reference_date: str) -> str:
     return adls.write_text(deputies_success_path(reference_date), "")
 
 
-def is_snapshot_metadata_valid(metadata: dict[str, Any] | None) -> bool:
-    if not metadata:
+def read_deputies_manifest(adls: AdlsRawWriter, reference_date: str) -> dict[str, Any] | None:
+    return adls.read_json(deputies_manifest_path(reference_date))
+
+
+def is_snapshot_manifest_valid(
+    manifest: dict[str, Any] | None, *, require_success_marker: bool = True
+) -> bool:
+    if not manifest:
         return False
-    status = str(metadata.get("status", "")).upper()
+    status = str(manifest.get("status", "")).upper()
     if status != "COMPLETED":
         return False
     try:
-        record_count = int(metadata.get("record_count", 0) or 0)
-        total_pages = int(metadata.get("total_pages", 0) or 0)
-        files_written = int(metadata.get("files_written", 0) or 0)
+        record_count = int(manifest.get("record_count", 0) or 0)
+        total_pages = int(manifest.get("total_pages", 0) or 0)
+        files_written = int(manifest.get("files_written", 0) or 0)
     except (TypeError, ValueError):
         return False
     if record_count <= 0 or total_pages <= 0:
         return False
     if files_written != total_pages:
         return False
+    if require_success_marker and not str(manifest.get("_success_path", "")).strip():
+        # Optional field for diagnostics; actual marker check happens at call sites.
+        pass
     return True
 
 
@@ -111,11 +130,12 @@ def load_deputies_from_snapshot(
     return deputies, pages_read
 
 
-def find_latest_completed_snapshot(adls: AdlsRawWriter) -> dict[str, Any] | None:
-    """Returns ``{"reference_date", "path", "metadata"}`` for the most recent _SUCCESS-marked snapshot.
+def find_latest_valid_snapshot(
+    adls: AdlsRawWriter, *, before_reference_date: str | None = None
+) -> dict[str, Any] | None:
+    """Returns latest valid deputies snapshot by Raw manifest + _SUCCESS marker.
 
-    A snapshot is considered valid only when ``_SUCCESS`` exists and ``metadata.json``
-    confirms ``status=COMPLETED`` with ``record_count > 0`` and ``files_written == total_pages``.
+    Returns ``{"reference_date", "path", "manifest"}``.
     """
     subdirs = adls.list_subdirectories(DEPUTIES_LIST_PREFIX)
     candidates: list[tuple[str, str]] = []
@@ -127,10 +147,12 @@ def find_latest_completed_snapshot(adls: AdlsRawWriter) -> dict[str, Any] | None
         candidates.append((dt, raw))
     candidates.sort(reverse=True)
     for dt, path in candidates:
+        if before_reference_date and dt >= before_reference_date:
+            continue
         if not adls.path_exists(f"{path}/_SUCCESS"):
             continue
-        metadata = adls.read_json(f"{path}/metadata.json") or {}
-        if not is_snapshot_metadata_valid(metadata):
+        manifest = adls.read_json(f"{path}/_metadata/run_summary.json") or {}
+        if not is_snapshot_manifest_valid(manifest):
             continue
-        return {"reference_date": dt, "path": path, "metadata": metadata}
+        return {"reference_date": dt, "path": path, "manifest": manifest}
     return None

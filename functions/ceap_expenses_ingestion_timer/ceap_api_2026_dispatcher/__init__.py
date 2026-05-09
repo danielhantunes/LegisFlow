@@ -18,8 +18,12 @@ from shared.ceap_partition_state import CeapPartitionStateStore
 from shared.ceap_run_registry import CeapRunRegistry
 from shared.deputies_snapshot import (
     deputies_date_dir,
+    find_latest_valid_snapshot,
+    is_snapshot_manifest_valid,
+    read_deputies_manifest,
     deputies_success_path,
     load_deputies_from_snapshot,
+    write_deputies_manifest,
     write_deputies_metadata,
     write_deputies_success_marker,
 )
@@ -322,30 +326,18 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         snapshot_execution_id = prev_snapshot_exec or dispatch_execution_id
         deputies: list[dict[str, Any]] = []
 
-        def _looks_like_completed_snapshot(record: dict[str, Any] | None) -> bool:
-            if not record:
-                return False
-            if str(record.get("status", "")).upper() != "COMPLETED":
-                return False
-            try:
-                rc = int(record.get("record_count", 0) or 0)
-                tp = int(record.get("total_pages", 0) or 0)
-            except (TypeError, ValueError):
-                return False
-            if rc <= 0 or tp <= 0:
-                return False
-            if not str(record.get("raw_path", "") or ""):
-                return False
-            return True
+        def _raw_manifest_valid_for_date(reference_date: str) -> tuple[bool, dict[str, Any]]:
+            manifest = read_deputies_manifest(raw_writer, reference_date) or {}
+            success_exists = raw_writer.path_exists(deputies_success_path(reference_date))
+            if not success_exists:
+                return False, manifest
+            return is_snapshot_manifest_valid(manifest), manifest
 
-        today_record = registry.get_snapshot(reference_date_str)
-        today_completed = _looks_like_completed_snapshot(
-            today_record
-        ) and raw_writer.path_exists(deputies_success_path(reference_date_str))
+        today_record = registry.get_snapshot(reference_date_str) or {}
+        today_completed, today_manifest = _raw_manifest_valid_for_date(reference_date_str)
 
         if today_completed:
-            assert today_record is not None
-            snapshot_path = str(today_record.get("raw_path", "") or deputies_date_dir(reference_date_str))
+            snapshot_path = str(today_manifest.get("raw_path", "") or deputies_date_dir(reference_date_str))
             try:
                 deputies, pages_read = load_deputies_from_snapshot(raw_writer, snapshot_path)
             except Exception as load_err:
@@ -364,14 +356,14 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 snapshot_reused = True
                 snapshot_in_use_date = reference_date_str
                 snapshot_in_use_path = snapshot_path
-                snapshot_in_use_record_count = int(today_record.get("record_count", 0) or 0)
+                snapshot_in_use_record_count = int(today_manifest.get("record_count", 0) or 0)
                 snapshot_in_use_source = "reused_today"
                 snapshot_status_value = "COMPLETED"
-                snapshot_completed_at = str(today_record.get("completed_at", "") or "")
-                total_dep_pages = int(today_record.get("total_pages", 0) or pages_read)
+                snapshot_completed_at = str(today_manifest.get("completed_at", "") or "")
+                total_dep_pages = int(today_manifest.get("total_pages", 0) or pages_read)
                 total_dep_records = snapshot_in_use_record_count or len(deputies)
                 snapshot_execution_id = (
-                    str(today_record.get("execution_id", "") or "")
+                    str(today_manifest.get("execution_id", "") or "")
                     or prev_snapshot_exec
                     or dispatch_execution_id
                 )
@@ -391,54 +383,53 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 today_completed = False  # recreate path
 
         if not snapshot_reused and mode == "reconciliation":
-            latest_record = registry.find_latest_completed_snapshot_record(
-                before_reference_date=reference_date_str
+            latest_raw = find_latest_valid_snapshot(
+                raw_writer, before_reference_date=reference_date_str
             )
-            if _looks_like_completed_snapshot(latest_record):
-                assert latest_record is not None
-                ref_dt = str(latest_record.get("reference_date", ""))
-                snapshot_path = str(latest_record.get("raw_path", "") or deputies_date_dir(ref_dt))
-                if raw_writer.path_exists(deputies_success_path(ref_dt)):
-                    try:
-                        deputies, pages_read = load_deputies_from_snapshot(raw_writer, snapshot_path)
-                    except Exception as load_err:
-                        deputies, pages_read = [], 0
-                        log_structured(
-                            logger,
-                            "warning",
-                            "Failed to load fallback deputies snapshot; will create one.",
-                            pipeline_run_id=pipeline_run_id,
-                            fallback_path=snapshot_path,
-                            error=str(load_err),
-                            error_type=type(load_err).__name__,
-                        )
-                    if deputies:
-                        snapshot_reused = True
-                        snapshot_in_use_date = ref_dt
-                        snapshot_in_use_path = snapshot_path
-                        snapshot_in_use_record_count = int(latest_record.get("record_count", 0) or 0)
-                        snapshot_in_use_source = "reused_fallback"
-                        snapshot_status_value = "COMPLETED"
-                        snapshot_completed_at = str(latest_record.get("completed_at", "") or "")
-                        total_dep_pages = int(latest_record.get("total_pages", 0) or pages_read)
-                        total_dep_records = snapshot_in_use_record_count or len(deputies)
-                        snapshot_execution_id = (
-                            str(latest_record.get("execution_id", "") or "")
-                            or prev_snapshot_exec
-                            or dispatch_execution_id
-                        )
-                        log_structured(
-                            logger,
-                            "warning",
-                            "Today's deputies snapshot incomplete; reusing latest COMPLETED snapshot for reconciliation.",
-                            pipeline_run_id=pipeline_run_id,
-                            current_reference_date=reference_date_str,
-                            deputies_snapshot_date=snapshot_in_use_date,
-                            deputies_snapshot_path=snapshot_in_use_path,
-                            deputies_snapshot_record_count=snapshot_in_use_record_count,
-                            snapshot_reused=True,
-                            snapshot_created=False,
-                        )
+            if latest_raw:
+                ref_dt = str(latest_raw.get("reference_date", ""))
+                latest_manifest = latest_raw.get("manifest") or {}
+                snapshot_path = str(latest_raw.get("path", "") or deputies_date_dir(ref_dt))
+                try:
+                    deputies, pages_read = load_deputies_from_snapshot(raw_writer, snapshot_path)
+                except Exception as load_err:
+                    deputies, pages_read = [], 0
+                    log_structured(
+                        logger,
+                        "warning",
+                        "Failed to load fallback deputies snapshot; will create one.",
+                        pipeline_run_id=pipeline_run_id,
+                        fallback_path=snapshot_path,
+                        error=str(load_err),
+                        error_type=type(load_err).__name__,
+                    )
+                if deputies:
+                    snapshot_reused = True
+                    snapshot_in_use_date = ref_dt
+                    snapshot_in_use_path = snapshot_path
+                    snapshot_in_use_record_count = int(latest_manifest.get("record_count", 0) or 0)
+                    snapshot_in_use_source = "reused_fallback"
+                    snapshot_status_value = "COMPLETED"
+                    snapshot_completed_at = str(latest_manifest.get("completed_at", "") or "")
+                    total_dep_pages = int(latest_manifest.get("total_pages", 0) or pages_read)
+                    total_dep_records = snapshot_in_use_record_count or len(deputies)
+                    snapshot_execution_id = (
+                        str(latest_manifest.get("execution_id", "") or "")
+                        or prev_snapshot_exec
+                        or dispatch_execution_id
+                    )
+                    log_structured(
+                        logger,
+                        "warning",
+                        "Today's deputies snapshot incomplete; reusing latest COMPLETED snapshot for reconciliation.",
+                        pipeline_run_id=pipeline_run_id,
+                        current_reference_date=reference_date_str,
+                        deputies_snapshot_date=snapshot_in_use_date,
+                        deputies_snapshot_path=snapshot_in_use_path,
+                        deputies_snapshot_record_count=snapshot_in_use_record_count,
+                        snapshot_reused=True,
+                        snapshot_created=False,
+                    )
 
         if not snapshot_reused:
             snapshot_execution_id = prev_snapshot_exec or dispatch_execution_id
@@ -543,6 +534,21 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     "files_written": total_dep_pages,
                     "error_message": "" if snapshot_status_value == "COMPLETED" else "Empty deputies response",
                 }
+                manifest_payload = {
+                    "endpoint": "deputados",
+                    "reference_date": reference_date_str,
+                    "status": snapshot_status_value,
+                    "total_pages": total_dep_pages,
+                    "record_count": total_dep_records,
+                    "started_at": snapshot_started_at,
+                    "completed_at": snapshot_completed_at,
+                    "raw_path": deputies_date_dir(reference_date_str),
+                    "files_written": total_dep_pages,
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "last_error": "" if snapshot_status_value == "COMPLETED" else "Empty deputies response",
+                    "pipeline_run_id": pipeline_run_id,
+                    "execution_id": snapshot_execution_id,
+                }
                 try:
                     write_deputies_metadata(raw_writer, reference_date_str, metadata_payload)
                 except Exception as meta_err:
@@ -554,6 +560,18 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                         reference_date=reference_date_str,
                         error=str(meta_err),
                         error_type=type(meta_err).__name__,
+                    )
+                try:
+                    write_deputies_manifest(raw_writer, reference_date_str, manifest_payload)
+                except Exception as manifest_err:
+                    log_structured(
+                        logger,
+                        "warning",
+                        "Failed to write deputies snapshot _metadata/run_summary.json.",
+                        pipeline_run_id=pipeline_run_id,
+                        reference_date=reference_date_str,
+                        error=str(manifest_err),
+                        error_type=type(manifest_err).__name__,
                     )
 
                 if snapshot_status_value == "COMPLETED":
@@ -926,6 +944,10 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             total_tasks_poison=total_tasks_poison,
         )
 
+        previous_status = str(run_refresh.get("status", "")).upper()
+        previous_last_error = str(run_refresh.get("last_error", "") or "")
+        previous_failed_at = str(run_refresh.get("failed_at", "") or "")
+
         upsert_payload: dict[str, Any] = {
             "pipeline_run_id": pipeline_run_id,
             "run_type": mode,
@@ -954,6 +976,16 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             upsert_payload["completed_at"] = completed_at_iso
         if last_error_text is not None:
             upsert_payload["last_error"] = last_error_text
+        if run_status == "COMPLETED":
+            # Run recovered/finished successfully: clear failure markers from previous attempts.
+            upsert_payload["failed_at"] = ""
+            upsert_payload["last_error"] = ""
+            if (
+                previous_failed_at
+                or previous_last_error
+                or previous_status in {"FAILED", "PARTIAL"}
+            ):
+                upsert_payload["last_recovered_at"] = datetime.now(UTC).isoformat()
 
         registry.upsert_run(upsert_payload)
         log_structured(
@@ -986,6 +1018,81 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         )
         final_status = str(run_done.get("status", ""))
         total_deputados = _deputados_total_hint(hint_payload)
+
+        # Write Raw run manifest for downstream Bronze orchestration.
+        raw_base_path = "raw/camara/ceap/api/despesas"
+        run_meta_prefix = (
+            f"{raw_base_path}/_metadata/runs/pipeline_run_id={pipeline_run_id}"
+        )
+        strict_completed = (
+            bool(run_done.get("enqueue_phase_complete"))
+            and int(run_done.get("total_tasks_expected", 0) or 0)
+            == int(run_done.get("total_tasks_success", 0) or 0)
+            and int(run_done.get("total_tasks_failed", 0) or 0) == 0
+            and int(run_done.get("total_tasks_pending", 0) or 0) == 0
+            and int(run_done.get("total_tasks_poison", 0) or 0) == 0
+            and int(run_done.get("total_tasks_running", 0) or 0) == 0
+        )
+        run_summary_payload: dict[str, Any] = {
+            "pipeline_run_id": pipeline_run_id,
+            "run_type": mode,
+            "status": final_status,
+            "target_year": target_year,
+            "months_to_process": run_done.get("months_to_process")
+            or json.dumps(month_list),
+            "started_at": run_done.get("started_at") or now.isoformat(),
+            "completed_at": run_done.get("completed_at") or completed_at_iso or "",
+            "total_tasks_expected": int(run_done.get("total_tasks_expected", 0) or 0),
+            "total_tasks_queued": int(run_done.get("total_tasks_queued", 0) or 0),
+            "total_tasks_success": int(run_done.get("total_tasks_success", 0) or 0),
+            "total_tasks_failed": int(run_done.get("total_tasks_failed", 0) or 0),
+            "total_tasks_pending": int(run_done.get("total_tasks_pending", 0) or 0),
+            "total_tasks_poison": int(run_done.get("total_tasks_poison", 0) or 0),
+            "total_tasks_running": int(run_done.get("total_tasks_running", 0) or 0),
+            "enqueue_phase_complete": bool(run_done.get("enqueue_phase_complete")),
+            "deputies_snapshot_date": run_done.get("deputies_snapshot_date")
+            or snapshot_in_use_date,
+            "deputies_snapshot_path": run_done.get("deputies_snapshot_path")
+            or snapshot_in_use_path,
+            "deputies_snapshot_record_count": int(
+                run_done.get("deputies_snapshot_record_count", 0)
+                or snapshot_in_use_record_count
+                or 0
+            ),
+            "deputies_snapshot_status": run_done.get("deputies_snapshot_status")
+            or snapshot_status_value,
+            "raw_base_path": raw_base_path,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        run_summary_path = f"{run_meta_prefix}/run_summary.json"
+        run_success_path = f"{run_meta_prefix}/_SUCCESS"
+        try:
+            raw_writer.write_json(run_summary_path, run_summary_payload)
+            if final_status == "COMPLETED" and strict_completed:
+                raw_writer.write_text(run_success_path, "")
+            log_structured(
+                logger,
+                "info",
+                "CEAP run manifest persisted in raw.",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                run_summary_path=run_summary_path,
+                run_success_path=run_success_path if (final_status == "COMPLETED" and strict_completed) else "",
+                final_status=final_status,
+                strict_completed=strict_completed,
+            )
+        except Exception as manifest_err:
+            log_structured(
+                logger,
+                "warning",
+                "Failed to persist CEAP run manifest in raw.",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                run_summary_path=run_summary_path,
+                final_status=final_status,
+                error=str(manifest_err),
+                error_type=type(manifest_err).__name__,
+            )
 
         log_structured(
             logger,

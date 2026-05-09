@@ -194,4 +194,11 @@ class CeapRunRegistry:
             patch["status"] = "RUNNING"
         else:
             patch.setdefault("status", str(ent.get("status", "QUEUED")))
+
+        if str(patch.get("status", "")).upper() == "COMPLETED":
+            had_failure_markers = bool(ent.get("failed_at")) or bool(str(ent.get("last_error", "")).strip())
+            if had_failure_markers or str(ent.get("status", "")).upper() in {"FAILED", "PARTIAL"}:
+                patch["last_recovered_at"] = datetime.now(timezone.utc).isoformat()
+            patch["failed_at"] = ""
+            patch["last_error"] = ""
         self.upsert_run(patch)
