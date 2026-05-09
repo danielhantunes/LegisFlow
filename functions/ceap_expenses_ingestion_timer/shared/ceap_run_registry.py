@@ -154,7 +154,7 @@ class CeapRunRegistry:
             f"PartitionKey eq '{self.PARTITION_SNAPSHOTS}' and endpoint eq 'deputados'"
         )
         candidates: list[dict[str, Any]] = []
-        for ent in self.table_client.list_entities(query_filter=flt):
+        for ent in self.table_client.list_entities(filter=flt):
             if str(ent.get("status", "")).upper() != "COMPLETED":
                 continue
             ref_dt = str(ent.get("reference_date", ""))

@@ -120,7 +120,7 @@ class IngestionControlApi2026Store:
             return
 
         # Table Storage: query partition ceap and filter in code for compound OR / optional filters.
-        entities = self.table_client.list_entities(query_filter=f"PartitionKey eq '{self.PARTITION_UNITS}'")
+        entities = self.table_client.list_entities(filter=f"PartitionKey eq '{self.PARTITION_UNITS}'")
         for ent in entities:
             if ent.get("RowKey", "").startswith("__"):
                 continue

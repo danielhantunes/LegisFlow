@@ -68,7 +68,7 @@ class CeapPartitionStateStore:
             f"PartitionKey eq '{self.PARTITION_KEY}' "
             f"and current_pipeline_run_id eq '{safe_run}'"
         )
-        for ent in self.table_client.list_entities(query_filter=flt):
+        for ent in self.table_client.list_entities(filter=flt):
             st = str(ent.get("status", "")).upper()
             if st == "QUEUED":
                 counts["queued"] += 1
@@ -97,7 +97,7 @@ class CeapPartitionStateStore:
         ano: int | None = None,
         mes: int | None = None,
     ) -> Any:
-        entities = self.table_client.list_entities(query_filter=f"PartitionKey eq '{self.PARTITION_KEY}'")
+        entities = self.table_client.list_entities(filter=f"PartitionKey eq '{self.PARTITION_KEY}'")
         want = {str(s).strip().upper() for s in statuses if str(s).strip()}
         for ent in entities:
             st = str(ent.get("status", "")).upper()
