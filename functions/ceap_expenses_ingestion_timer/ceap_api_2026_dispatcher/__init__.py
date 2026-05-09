@@ -8,6 +8,7 @@ import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import azure.functions as func
 
@@ -15,6 +16,13 @@ from shared.adls_writer import AdlsRawWriter
 from shared.api_client import CamaraApiClient
 from shared.ceap_partition_state import CeapPartitionStateStore
 from shared.ceap_run_registry import CeapRunRegistry
+from shared.deputies_snapshot import (
+    deputies_date_dir,
+    deputies_success_path,
+    load_deputies_from_snapshot,
+    write_deputies_metadata,
+    write_deputies_success_marker,
+)
 from shared.dispatch_months import (
     max_dispatch_month,
     months_daily_moving_window,
@@ -28,6 +36,11 @@ logger = get_logger()
 
 # After this many consecutive ticks with zero new messages, treat enqueue phase as complete.
 _IDLE_TICKS_ENQUEUE_DONE = 3
+
+# Chunk size used when iterating the in-memory deputies list during the enqueue phase.
+# Kept aligned with the /deputados API default itens=100 to preserve the cursor semantics
+# (next_pagina / next_idx) across in-flight runs.
+_DEPUTIES_CHUNK_SIZE = 100
 
 
 def _deputados_total_hint(payload: dict[str, Any] | None, itens_per_page: int = 100) -> int | None:
@@ -104,6 +117,11 @@ def _partition_enqueue_action(
 
 def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     now = datetime.now(UTC)
+    reference_tz_name = os.getenv("CEAP_REFERENCE_TIMEZONE", "America/Sao_Paulo")
+    try:
+        reference_date_str = datetime.now(ZoneInfo(reference_tz_name)).date().isoformat()
+    except Exception:
+        reference_date_str = now.date().isoformat()
     conn = os.environ["AzureWebJobsStorage"]
     control_table = os.getenv("INGESTION_CONTROL_TABLE", "IngestionControlApi2026")
     state_table = os.getenv("INGESTION_STATE_TABLE", "IngestionState")
@@ -115,7 +133,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     start_month = int(os.getenv("CEAP_RECONCILIATION_START_MONTH", "1"))
     stale_after_minutes = int(os.getenv("CEAP_STALE_AFTER_MINUTES", "60"))
     max_per_tick = int(
-        os.getenv("CEAP_MAX_TASKS_PER_DISPATCH", os.getenv("CEAP_DISPATCH_MAX_MESSAGES", "100"))
+        os.getenv("CEAP_MAX_TASKS_PER_DISPATCH", os.getenv("CEAP_DISPATCH_MAX_MESSAGES", "1000"))
     )
 
     max_m = max_dispatch_month(target_year=target_year, now=now)
@@ -254,6 +272,13 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     "next_month_idx": 0,
                     "idle_enqueue_ticks": 0,
                     "enqueue_phase_complete": False,
+                    "deputies_pages_written": 0,
+                    "deputies_records_count": 0,
+                    "deputies_snapshot_status": "IN_PROGRESS",
+                    "deputies_snapshot_first_execution_id": "",
+                    "deputies_snapshot_date": "",
+                    "deputies_snapshot_path": "",
+                    "deputies_snapshot_record_count": 0,
                 }
             )
             log_structured(
@@ -278,12 +303,361 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         remaining = max_per_tick
         hint_payload: dict[str, Any] | None = None
 
-        while remaining > 0:
-            payload, http_status = api.list_deputies_page(page=pagina)
-            dados = payload.get("dados") or []
-            if dados and hint_payload is None:
-                hint_payload = payload
-            if not dados:
+        prev_snapshot_exec = str(run.get("deputies_snapshot_first_execution_id", "") or "")
+        snapshot_started_at = str(run.get("started_at", "") or now.isoformat())
+
+        # =====================================================================
+        # Phase A — Ensure deputies snapshot (reuse if COMPLETED, otherwise create)
+        # =====================================================================
+        snapshot_reused = False
+        snapshot_created = False
+        snapshot_in_use_date = ""
+        snapshot_in_use_path = ""
+        snapshot_in_use_record_count = 0
+        snapshot_in_use_source = "none"
+        snapshot_status_value = "IN_PROGRESS"
+        snapshot_completed_at = ""
+        total_dep_pages = 0
+        total_dep_records = 0
+        snapshot_execution_id = prev_snapshot_exec or dispatch_execution_id
+        deputies: list[dict[str, Any]] = []
+
+        def _looks_like_completed_snapshot(record: dict[str, Any] | None) -> bool:
+            if not record:
+                return False
+            if str(record.get("status", "")).upper() != "COMPLETED":
+                return False
+            try:
+                rc = int(record.get("record_count", 0) or 0)
+                tp = int(record.get("total_pages", 0) or 0)
+            except (TypeError, ValueError):
+                return False
+            if rc <= 0 or tp <= 0:
+                return False
+            if not str(record.get("raw_path", "") or ""):
+                return False
+            return True
+
+        today_record = registry.get_snapshot(reference_date_str)
+        today_completed = _looks_like_completed_snapshot(
+            today_record
+        ) and raw_writer.path_exists(deputies_success_path(reference_date_str))
+
+        if today_completed:
+            assert today_record is not None
+            snapshot_path = str(today_record.get("raw_path", "") or deputies_date_dir(reference_date_str))
+            try:
+                deputies, pages_read = load_deputies_from_snapshot(raw_writer, snapshot_path)
+            except Exception as load_err:
+                deputies, pages_read = [], 0
+                log_structured(
+                    logger,
+                    "warning",
+                    "Failed to load completed deputies snapshot; will recreate.",
+                    pipeline_run_id=pipeline_run_id,
+                    snapshot_path=snapshot_path,
+                    error=str(load_err),
+                    error_type=type(load_err).__name__,
+                )
+
+            if deputies:
+                snapshot_reused = True
+                snapshot_in_use_date = reference_date_str
+                snapshot_in_use_path = snapshot_path
+                snapshot_in_use_record_count = int(today_record.get("record_count", 0) or 0)
+                snapshot_in_use_source = "reused_today"
+                snapshot_status_value = "COMPLETED"
+                snapshot_completed_at = str(today_record.get("completed_at", "") or "")
+                total_dep_pages = int(today_record.get("total_pages", 0) or pages_read)
+                total_dep_records = snapshot_in_use_record_count or len(deputies)
+                snapshot_execution_id = (
+                    str(today_record.get("execution_id", "") or "")
+                    or prev_snapshot_exec
+                    or dispatch_execution_id
+                )
+                log_structured(
+                    logger,
+                    "info",
+                    "Reusing today's deputies snapshot (no /deputados call).",
+                    pipeline_run_id=pipeline_run_id,
+                    mode=mode,
+                    deputies_snapshot_date=snapshot_in_use_date,
+                    deputies_snapshot_path=snapshot_in_use_path,
+                    deputies_snapshot_record_count=snapshot_in_use_record_count,
+                    snapshot_reused=True,
+                    snapshot_created=False,
+                )
+            else:
+                today_completed = False  # recreate path
+
+        if not snapshot_reused and mode == "reconciliation":
+            latest_record = registry.find_latest_completed_snapshot_record(
+                before_reference_date=reference_date_str
+            )
+            if _looks_like_completed_snapshot(latest_record):
+                assert latest_record is not None
+                ref_dt = str(latest_record.get("reference_date", ""))
+                snapshot_path = str(latest_record.get("raw_path", "") or deputies_date_dir(ref_dt))
+                if raw_writer.path_exists(deputies_success_path(ref_dt)):
+                    try:
+                        deputies, pages_read = load_deputies_from_snapshot(raw_writer, snapshot_path)
+                    except Exception as load_err:
+                        deputies, pages_read = [], 0
+                        log_structured(
+                            logger,
+                            "warning",
+                            "Failed to load fallback deputies snapshot; will create one.",
+                            pipeline_run_id=pipeline_run_id,
+                            fallback_path=snapshot_path,
+                            error=str(load_err),
+                            error_type=type(load_err).__name__,
+                        )
+                    if deputies:
+                        snapshot_reused = True
+                        snapshot_in_use_date = ref_dt
+                        snapshot_in_use_path = snapshot_path
+                        snapshot_in_use_record_count = int(latest_record.get("record_count", 0) or 0)
+                        snapshot_in_use_source = "reused_fallback"
+                        snapshot_status_value = "COMPLETED"
+                        snapshot_completed_at = str(latest_record.get("completed_at", "") or "")
+                        total_dep_pages = int(latest_record.get("total_pages", 0) or pages_read)
+                        total_dep_records = snapshot_in_use_record_count or len(deputies)
+                        snapshot_execution_id = (
+                            str(latest_record.get("execution_id", "") or "")
+                            or prev_snapshot_exec
+                            or dispatch_execution_id
+                        )
+                        log_structured(
+                            logger,
+                            "warning",
+                            "Today's deputies snapshot incomplete; reusing latest COMPLETED snapshot for reconciliation.",
+                            pipeline_run_id=pipeline_run_id,
+                            current_reference_date=reference_date_str,
+                            deputies_snapshot_date=snapshot_in_use_date,
+                            deputies_snapshot_path=snapshot_in_use_path,
+                            deputies_snapshot_record_count=snapshot_in_use_record_count,
+                            snapshot_reused=True,
+                            snapshot_created=False,
+                        )
+
+        if not snapshot_reused:
+            snapshot_execution_id = prev_snapshot_exec or dispatch_execution_id
+            try:
+                registry.upsert_snapshot(
+                    reference_date_str,
+                    {
+                        "status": "IN_PROGRESS",
+                        "execution_id": snapshot_execution_id,
+                        "pipeline_run_id": pipeline_run_id,
+                        "started_at": snapshot_started_at,
+                        "raw_path": deputies_date_dir(reference_date_str),
+                        "total_pages": 0,
+                        "record_count": 0,
+                        "last_error": "",
+                    },
+                )
+            except Exception as snap_err:
+                log_structured(
+                    logger,
+                    "warning",
+                    "Failed to upsert IN_PROGRESS snapshot record.",
+                    pipeline_run_id=pipeline_run_id,
+                    reference_date=reference_date_str,
+                    error=str(snap_err),
+                    error_type=type(snap_err).__name__,
+                )
+
+            log_structured(
+                logger,
+                "info",
+                "Creating new deputies snapshot (calling /deputados).",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                reference_date=reference_date_str,
+                snapshot_execution_id=snapshot_execution_id,
+            )
+
+            collected: list[dict[str, Any]] = []
+            pagina_api = 1
+            pages_written = 0
+            try:
+                while True:
+                    payload, http_status = api.list_deputies_page(page=pagina_api)
+                    dados = payload.get("dados") or []
+                    if dados and hint_payload is None:
+                        hint_payload = payload
+                    if not dados:
+                        log_structured(
+                            logger,
+                            "info",
+                            "Dispatcher reached end of deputy list (empty page).",
+                            pipeline_run_id=pipeline_run_id,
+                            http_status=http_status,
+                            pagina=pagina_api,
+                        )
+                        break
+
+                    raw_path = (
+                        f"{deputies_date_dir(reference_date_str)}/"
+                        f"pipeline_run_id={pipeline_run_id}/"
+                        f"execution_id={snapshot_execution_id}/"
+                        f"page_{pagina_api}.json"
+                    )
+                    raw_writer.write_json(raw_path, payload)
+                    pages_written += 1
+                    collected.extend([d for d in dados if isinstance(d, dict) and "id" in d])
+                    log_structured(
+                        logger,
+                        "info",
+                        "Deputies page persisted in raw.",
+                        mode=mode,
+                        pipeline_run_id=pipeline_run_id,
+                        dispatch_execution_id=dispatch_execution_id,
+                        snapshot_execution_id=snapshot_execution_id,
+                        reference_date=reference_date_str,
+                        reference_timezone=reference_tz_name,
+                        page=pagina_api,
+                        record_count=len(dados),
+                        raw_path=raw_path,
+                        http_status=http_status,
+                    )
+                    pagina_api += 1
+
+                snapshot_completed_at = datetime.now(UTC).isoformat()
+                deputies = collected
+                total_dep_pages = pages_written
+                total_dep_records = len(collected)
+                snapshot_status_value = "COMPLETED" if total_dep_records > 0 else "FAILED"
+
+                metadata_payload = {
+                    "endpoint": "deputados",
+                    "reference_date": reference_date_str,
+                    "reference_timezone": reference_tz_name,
+                    "pipeline_run_id": pipeline_run_id,
+                    "execution_id": snapshot_execution_id,
+                    "status": snapshot_status_value,
+                    "total_pages": total_dep_pages,
+                    "record_count": total_dep_records,
+                    "started_at": snapshot_started_at,
+                    "completed_at": snapshot_completed_at,
+                    "files_written": total_dep_pages,
+                    "error_message": "" if snapshot_status_value == "COMPLETED" else "Empty deputies response",
+                }
+                try:
+                    write_deputies_metadata(raw_writer, reference_date_str, metadata_payload)
+                except Exception as meta_err:
+                    log_structured(
+                        logger,
+                        "warning",
+                        "Failed to write deputies snapshot metadata.json.",
+                        pipeline_run_id=pipeline_run_id,
+                        reference_date=reference_date_str,
+                        error=str(meta_err),
+                        error_type=type(meta_err).__name__,
+                    )
+
+                if snapshot_status_value == "COMPLETED":
+                    try:
+                        write_deputies_success_marker(raw_writer, reference_date_str)
+                    except Exception as success_err:
+                        log_structured(
+                            logger,
+                            "warning",
+                            "Failed to write deputies _SUCCESS marker.",
+                            pipeline_run_id=pipeline_run_id,
+                            reference_date=reference_date_str,
+                            error=str(success_err),
+                            error_type=type(success_err).__name__,
+                        )
+
+                try:
+                    registry.upsert_snapshot(
+                        reference_date_str,
+                        {
+                            "status": snapshot_status_value,
+                            "execution_id": snapshot_execution_id,
+                            "pipeline_run_id": pipeline_run_id,
+                            "started_at": snapshot_started_at,
+                            "completed_at": snapshot_completed_at,
+                            "total_pages": total_dep_pages,
+                            "record_count": total_dep_records,
+                            "raw_path": deputies_date_dir(reference_date_str),
+                            "last_error": "" if snapshot_status_value == "COMPLETED" else "Empty deputies response",
+                        },
+                    )
+                except Exception as snap_err:
+                    log_structured(
+                        logger,
+                        "warning",
+                        "Failed to upsert COMPLETED snapshot record.",
+                        pipeline_run_id=pipeline_run_id,
+                        reference_date=reference_date_str,
+                        error=str(snap_err),
+                        error_type=type(snap_err).__name__,
+                    )
+
+                snapshot_in_use_date = reference_date_str
+                snapshot_in_use_path = deputies_date_dir(reference_date_str)
+                snapshot_in_use_record_count = total_dep_records
+                snapshot_in_use_source = "created_today" if total_dep_records > 0 else "none"
+                snapshot_created = True
+
+                log_structured(
+                    logger,
+                    "info",
+                    "Deputies snapshot collection finished.",
+                    pipeline_run_id=pipeline_run_id,
+                    mode=mode,
+                    reference_date=reference_date_str,
+                    snapshot_status=snapshot_status_value,
+                    total_pages=total_dep_pages,
+                    record_count=total_dep_records,
+                    snapshot_reused=False,
+                    snapshot_created=True,
+                )
+            except Exception as collect_err:
+                try:
+                    registry.upsert_snapshot(
+                        reference_date_str,
+                        {
+                            "status": "FAILED",
+                            "execution_id": snapshot_execution_id,
+                            "pipeline_run_id": pipeline_run_id,
+                            "started_at": snapshot_started_at,
+                            "total_pages": pages_written,
+                            "record_count": len(collected),
+                            "raw_path": deputies_date_dir(reference_date_str),
+                            "last_error": f"{type(collect_err).__name__}: {str(collect_err)}",
+                        },
+                    )
+                except Exception:
+                    pass
+                raise
+
+        if not deputies:
+            log_structured(
+                logger,
+                "warning",
+                "No deputies available after Phase A; skipping enqueue this tick.",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                snapshot_in_use_date=snapshot_in_use_date,
+                snapshot_in_use_source=snapshot_in_use_source,
+                snapshot_reused=snapshot_reused,
+                snapshot_created=snapshot_created,
+            )
+
+        # =====================================================================
+        # Phase B — Enqueue CEAP tasks from in-memory deputies list
+        # =====================================================================
+        total_deputies = len(deputies)
+        snapshot_pages = max(
+            1, (total_deputies + _DEPUTIES_CHUNK_SIZE - 1) // _DEPUTIES_CHUNK_SIZE
+        ) if total_deputies > 0 else 0
+
+        while remaining > 0 and total_deputies > 0:
+            start_idx = (pagina - 1) * _DEPUTIES_CHUNK_SIZE
+            if start_idx >= total_deputies:
                 registry.upsert_run(
                     {
                         "pipeline_run_id": pipeline_run_id,
@@ -295,35 +669,25 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 log_structured(
                     logger,
                     "info",
-                    "Dispatcher reached end of deputy list (empty page).",
-                    http_status=http_status,
+                    "Dispatcher walked through whole deputies list.",
+                    pipeline_run_id=pipeline_run_id,
                     pagina=pagina,
+                    snapshot_pages=snapshot_pages,
+                    total_deputies=total_deputies,
                 )
                 break
 
-            deputies_raw_path = (
-                "raw/camara/deputados/api/list/"
-                f"reference_date={now:%Y-%m-%d}/"
-                f"pipeline_run_id={pipeline_run_id}/"
-                f"execution_id={dispatch_execution_id}/"
-                f"page_{pagina}.json"
-            )
-            deputies_written = raw_writer.write_json(deputies_raw_path, payload)
-            log_structured(
-                logger,
-                "info",
-                "Deputies page persisted in raw.",
-                mode=mode,
-                pipeline_run_id=pipeline_run_id,
-                dispatch_execution_id=dispatch_execution_id,
-                page=pagina,
-                record_count=len(dados),
-                raw_path=deputies_written,
-                http_status=http_status,
-            )
+            end_idx = min(start_idx + _DEPUTIES_CHUNK_SIZE, total_deputies)
+            chunk = deputies[start_idx:end_idx]
 
-            while idx < len(dados) and remaining > 0:
-                dep_id = int(dados[idx]["id"])
+            while idx < len(chunk) and remaining > 0:
+                try:
+                    dep_id = int(chunk[idx]["id"])
+                except (KeyError, TypeError, ValueError):
+                    idx += 1
+                    month_idx = 0
+                    continue
+
                 while month_idx < len(month_list) and remaining > 0:
                     mes = month_list[month_idx]
                     if mes > max_m:
@@ -405,7 +769,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     month_idx = 0
                     idx += 1
 
-            if idx >= len(dados):
+            if idx >= len(chunk):
                 pagina += 1
                 idx = 0
                 month_idx = 0
@@ -424,6 +788,10 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             if remaining == 0:
                 break
 
+        enqueue_walked_full_list = (
+            total_deputies > 0 and (pagina - 1) * _DEPUTIES_CHUNK_SIZE >= total_deputies
+        )
+
         log_structured(
             logger,
             "info",
@@ -436,6 +804,12 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             pagina=pagina,
             idx=idx,
             month_idx=month_idx,
+            total_deputies=total_deputies,
+            snapshot_pages=snapshot_pages,
+            enqueue_walked_full_list=enqueue_walked_full_list,
+            snapshot_reused=snapshot_reused,
+            snapshot_created=snapshot_created,
+            snapshot_in_use_source=snapshot_in_use_source,
         )
 
         if queued_this_tick == 0:
@@ -465,75 +839,132 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         enqueue_complete = bool(run_refresh.get("enqueue_phase_complete"))
         total_tasks_expected = int(run_refresh.get("total_tasks_expected", 0) or 0)
 
+        if enqueue_walked_full_list:
+            enqueue_complete = True
         if idle_ticks >= _IDLE_TICKS_ENQUEUE_DONE:
             enqueue_complete = True
-        if enqueue_complete and total_tasks_expected == 0:
-            total_tasks_expected = total_queued
 
-        if enqueue_complete and total_queued == 0:
-            run_status = "COMPLETED"
-            log_structured(
-                logger,
-                "info",
-                "[BEFORE_FINAL_UPSERT]",
-                pipeline_run_id=pipeline_run_id,
-                mode=mode,
-                upsert_stage="final_completed",
-                idle_ticks=idle_ticks,
-                total_tasks_queued=total_queued,
-            )
-            registry.upsert_run(
-                {
-                    "pipeline_run_id": pipeline_run_id,
-                    "idle_enqueue_ticks": idle_ticks,
-                    "enqueue_phase_complete": True,
-                    "total_tasks_expected": 0,
-                    "total_tasks_queued": 0,
-                    "status": run_status,
-                    "completed_at": datetime.now(UTC).isoformat(),
-                    "last_error": "",
-                }
-            )
-            log_structured(
-                logger,
-                "info",
-                "[AFTER_FINAL_UPSERT]",
-                pipeline_run_id=pipeline_run_id,
-                mode=mode,
-                upsert_stage="final_completed",
+        partition_counts = parts.count_statuses_by_run(pipeline_run_id)
+        total_tasks_success = partition_counts["success"]
+        total_tasks_failed = partition_counts["failed"]
+        total_tasks_running = partition_counts["running"]
+        total_tasks_pending = partition_counts["pending"]
+        total_tasks_poison = partition_counts["poison"]
+        total_tasks_queued_state = partition_counts["queued"]
+        total_tasks_stale_state = partition_counts["stale"]
+        total_tasks_other_state = partition_counts["other"]
+
+        if enqueue_complete:
+            total_tasks_expected = (
+                total_tasks_queued_state
+                + total_tasks_running
+                + total_tasks_success
+                + total_tasks_failed
+                + total_tasks_pending
+                + total_tasks_poison
+                + total_tasks_stale_state
+                + total_tasks_other_state
             )
         else:
-            log_structured(
-                logger,
-                "info",
-                "[BEFORE_FINAL_UPSERT]",
-                pipeline_run_id=pipeline_run_id,
-                mode=mode,
-                upsert_stage="final_queueing_or_queued",
-                idle_ticks=idle_ticks,
-                enqueue_phase_complete=enqueue_complete,
-                total_tasks_expected=total_tasks_expected,
-                total_tasks_queued=total_queued,
+            total_tasks_expected = max(total_queued, total_tasks_expected)
+
+        all_finished = (
+            total_tasks_running == 0
+            and total_tasks_queued_state == 0
+            and total_tasks_pending == 0
+            and total_tasks_stale_state == 0
+            and total_tasks_other_state == 0
+        )
+
+        completed_at_iso: str | None = None
+        last_error_text: str | None = None
+        if (
+            enqueue_complete
+            and total_tasks_expected > 0
+            and total_tasks_success == total_tasks_expected
+            and total_tasks_failed == 0
+            and total_tasks_poison == 0
+            and total_tasks_running == 0
+            and total_tasks_queued_state == 0
+            and total_tasks_pending == 0
+        ):
+            run_status = "COMPLETED"
+            completed_at_iso = datetime.now(UTC).isoformat()
+            last_error_text = ""
+        elif enqueue_complete and total_tasks_expected == 0 and total_queued == 0:
+            run_status = "COMPLETED"
+            completed_at_iso = datetime.now(UTC).isoformat()
+            last_error_text = ""
+        elif enqueue_complete and all_finished and (total_tasks_failed > 0 or total_tasks_poison > 0):
+            run_status = "PARTIAL" if total_tasks_success > 0 else "FAILED"
+            completed_at_iso = datetime.now(UTC).isoformat()
+            last_error_text = (
+                f"failed={total_tasks_failed}, poison={total_tasks_poison}"
             )
-            registry.upsert_run(
-                {
-                    "pipeline_run_id": pipeline_run_id,
-                    "idle_enqueue_ticks": idle_ticks,
-                    "enqueue_phase_complete": enqueue_complete,
-                    "total_tasks_expected": total_tasks_expected,
-                    "total_tasks_queued": total_queued,
-                    "status": ("QUEUED" if enqueue_complete else "QUEUING"),
-                    "last_error": "",
-                }
-            )
-            log_structured(
-                logger,
-                "info",
-                "[AFTER_FINAL_UPSERT]",
-                pipeline_run_id=pipeline_run_id,
-                mode=mode,
-                upsert_stage="final_queueing_or_queued",
-            )
+        elif total_tasks_running > 0:
+            run_status = "RUNNING"
+        elif enqueue_complete:
+            run_status = "QUEUED"
+        else:
+            run_status = "QUEUING"
+
+        log_structured(
+            logger,
+            "info",
+            "[BEFORE_FINAL_UPSERT]",
+            pipeline_run_id=pipeline_run_id,
+            mode=mode,
+            upsert_stage="final_summary",
+            run_status=run_status,
+            enqueue_phase_complete=enqueue_complete,
+            total_tasks_expected=total_tasks_expected,
+            total_tasks_queued=total_queued,
+            total_tasks_success=total_tasks_success,
+            total_tasks_failed=total_tasks_failed,
+            total_tasks_running=total_tasks_running,
+            total_tasks_pending=total_tasks_pending,
+            total_tasks_poison=total_tasks_poison,
+        )
+
+        upsert_payload: dict[str, Any] = {
+            "pipeline_run_id": pipeline_run_id,
+            "run_type": mode,
+            "idle_enqueue_ticks": idle_ticks,
+            "enqueue_phase_complete": enqueue_complete,
+            "total_tasks_expected": total_tasks_expected,
+            "total_tasks_queued": total_queued,
+            "total_tasks_success": total_tasks_success,
+            "total_tasks_failed": total_tasks_failed,
+            "total_tasks_running": total_tasks_running,
+            "total_tasks_pending": total_tasks_pending,
+            "total_tasks_poison": total_tasks_poison,
+            "status": run_status,
+            "deputies_pages_written": total_dep_pages,
+            "deputies_records_count": total_dep_records,
+            "deputies_snapshot_status": snapshot_status_value,
+            "deputies_snapshot_first_execution_id": snapshot_execution_id,
+            "deputies_snapshot_date": snapshot_in_use_date,
+            "deputies_snapshot_path": snapshot_in_use_path,
+            "deputies_snapshot_record_count": snapshot_in_use_record_count,
+            "deputies_snapshot_source": snapshot_in_use_source,
+        }
+        if snapshot_completed_at:
+            upsert_payload["deputies_snapshot_completed_at"] = snapshot_completed_at
+        if completed_at_iso is not None:
+            upsert_payload["completed_at"] = completed_at_iso
+        if last_error_text is not None:
+            upsert_payload["last_error"] = last_error_text
+
+        registry.upsert_run(upsert_payload)
+        log_structured(
+            logger,
+            "info",
+            "[AFTER_FINAL_UPSERT]",
+            pipeline_run_id=pipeline_run_id,
+            mode=mode,
+            upsert_stage="final_summary",
+            run_status=run_status,
+        )
 
         log_structured(
             logger,
@@ -568,6 +999,11 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             total_deputados=total_deputados,
             total_tasks_expected=total_tasks_expected,
             total_tasks_queued=total_queued,
+            total_tasks_success=total_tasks_success,
+            total_tasks_failed=total_tasks_failed,
+            total_tasks_running=total_tasks_running,
+            total_tasks_pending=total_tasks_pending,
+            total_tasks_poison=total_tasks_poison,
             messages_enqueued=queued_this_tick,
             stale_queued_reenqueued=stale_queued_reenqueued,
             stale_running_reenqueued=stale_running_reenqueued,
@@ -578,10 +1014,22 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             lock_acquired=True,
             idle_enqueue_ticks=idle_ticks,
             enqueue_phase_complete=enqueue_complete,
+            completed_at=completed_at_iso,
             next_pagina=pagina,
             next_idx=idx,
             next_month_idx=month_idx,
             final_status=final_status,
+            deputies_pages_written=total_dep_pages,
+            deputies_records_count=total_dep_records,
+            deputies_snapshot_status=snapshot_status_value,
+            deputies_snapshot_date=snapshot_in_use_date,
+            deputies_snapshot_path=snapshot_in_use_path,
+            deputies_snapshot_record_count=snapshot_in_use_record_count,
+            deputies_snapshot_source=snapshot_in_use_source,
+            deputies_snapshot_completed_at=snapshot_completed_at,
+            snapshot_reused=snapshot_reused,
+            snapshot_created=snapshot_created,
+            ceap_max_tasks_per_dispatch=max_per_tick,
         )
         log_structured(
             logger,
@@ -589,15 +1037,29 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             "[DISPATCH_TICK_FINISHED]",
             pipeline_run_id=pipeline_run_id,
             mode=mode,
+            status=final_status,
             queued_this_tick=queued_this_tick,
             total_queued=total_queued,
+            total_tasks_expected=total_tasks_expected,
+            total_tasks_success=total_tasks_success,
+            total_tasks_failed=total_tasks_failed,
+            total_tasks_running=total_tasks_running,
+            total_tasks_pending=total_tasks_pending,
+            total_tasks_poison=total_tasks_poison,
             remaining=remaining,
             pagina=pagina,
             idx=idx,
             month_idx=month_idx,
             idle_ticks=idle_ticks,
             enqueue_phase_complete=enqueue_complete,
+            completed_at=completed_at_iso,
             final_status=final_status,
+            snapshot_reused=snapshot_reused,
+            snapshot_created=snapshot_created,
+            deputies_snapshot_date=snapshot_in_use_date,
+            deputies_snapshot_path=snapshot_in_use_path,
+            deputies_snapshot_record_count=snapshot_in_use_record_count,
+            ceap_max_tasks_per_dispatch=max_per_tick,
         )
     except Exception as e:
         log_structured(

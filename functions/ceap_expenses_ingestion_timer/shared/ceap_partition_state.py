@@ -46,6 +46,48 @@ class CeapPartitionStateStore:
                 entity[k] = v
         self.table_client.upsert_entity(entity=entity, mode="merge")
 
+    def count_statuses_by_run(self, pipeline_run_id: str) -> dict[str, int]:
+        """Counts of IngestionState partitions for the given pipeline_run_id, grouped by status.
+
+        Returns keys: queued, running, success, failed, poison, pending, stale, other.
+        """
+        counts = {
+            "queued": 0,
+            "running": 0,
+            "success": 0,
+            "failed": 0,
+            "poison": 0,
+            "pending": 0,
+            "stale": 0,
+            "other": 0,
+        }
+        if not pipeline_run_id:
+            return counts
+        safe_run = pipeline_run_id.replace("'", "''")
+        flt = (
+            f"PartitionKey eq '{self.PARTITION_KEY}' "
+            f"and current_pipeline_run_id eq '{safe_run}'"
+        )
+        for ent in self.table_client.list_entities(query_filter=flt):
+            st = str(ent.get("status", "")).upper()
+            if st == "QUEUED":
+                counts["queued"] += 1
+            elif st == "RUNNING":
+                counts["running"] += 1
+            elif st == "SUCCESS":
+                counts["success"] += 1
+            elif st == "FAILED":
+                counts["failed"] += 1
+            elif st == "POISON":
+                counts["poison"] += 1
+            elif st == "PENDING":
+                counts["pending"] += 1
+            elif st == "STALE":
+                counts["stale"] += 1
+            else:
+                counts["other"] += 1
+        return counts
+
     def iter_partitions_for_replay(
         self,
         *,

@@ -133,7 +133,8 @@ Ingestão CEAP 2026 precisa de atualização frequente (janela móvel) sem repro
 ### Decision
 
 - Um único timer `ceap_api_2026_dispatcher` escolhe o modo por **data UTC** (`CEAP_RECONCILIATION_DAY`): nesse dia só **reconciliation**; nos demais, **daily** (mês atual + meses anteriores conforme `CEAP_DAILY_LOOKBACK_MONTHS`), sempre filtrando meses futuros e respeitando `CEAP_TARGET_YEAR`.
-- Registo de **pipeline run** em `IngestionControlApi2026` (`_runs`, `RowKey` = `pipeline_run_id`), com fase de enqueue limitada por `CEAP_MAX_TASKS_PER_DISPATCH`, conclusão da fase de enqueue via ticks ociosos consecutivos, e **lock** em `_locks/ceap_dispatcher_lock` (TTL 15 minutos).
+- Cada tick é dividido em **Fase A (snapshot de deputados)** e **Fase B (enfileiramento CEAP)**. A Fase A reusa o snapshot diário de `/deputados` quando `IngestionControlApi2026._snapshots/deputados_YYYYMMDD` está `COMPLETED` e o `_SUCCESS` existe em Raw; só chama `/deputados` quando precisa criar/recriar o snapshot. Em `reconciliation` há fallback para o snapshot completo mais recente.
+- Registo de **pipeline run** em `IngestionControlApi2026` (`_runs`, `RowKey` = `pipeline_run_id`), com fase de enqueue limitada por `CEAP_MAX_TASKS_PER_DISPATCH` (default 1000), conclusão da fase de enqueue via lista de deputados percorrida ou ticks ociosos consecutivos, e **lock** em `_locks/ceap_dispatcher_lock` (TTL 15 minutos).
 - Estado por partição em **IngestionState** (`ceap_2026`), incluindo `current_pipeline_run_id` e `mode`; fila idempotente para o mesmo `pipeline_run_id` quando status já é QUEUED/RUNNING/SUCCESS.
 - O **worker** único interpreta `mode` na mensagem; Raw inclui `pipeline_run_id` e `execution_id` no caminho para não sobrescrever blobs entre execuções.
 - **Replay** HTTP continua só para falhas (FAILED/POISON), lendo IngestionState; não é o mecanismo da reconciliação automática.

@@ -11,6 +11,11 @@ Restaurar a ingestão resiliente de despesas CEAP via API da Câmara (Dados Aber
 
 ## Visão geral de modos (dispatcher)
 
+O dispatcher executa em **duas fases por tick**:
+
+1. **Fase A — snapshot de deputados**: garante uma cópia válida de `/deputados`. Antes de chamar a API, consulta `IngestionControlApi2026._snapshots/deputados_YYYYMMDD` e o marcador `_SUCCESS` no Raw. Se o snapshot da `reference_date` atual já está `COMPLETED` (e válido), **reaproveita-o em memória sem chamar a API**. Em modo `reconciliation`, se a `reference_date` atual ainda não tem snapshot completo, faz fallback para o snapshot `COMPLETED` mais recente. Caso contrário, chama `GET /deputados` paginado, persiste cada página em Raw, escreve `metadata.json` + `_SUCCESS` no fim e atualiza `_snapshots`. Isto evita chamar `/deputados` a cada 20 min.
+2. **Fase B — enfileiramento CEAP**: percorre a lista de deputados in-memory em chunks de 100, gera mensagens CEAP por deputado × mês, respeita o limite de **`CEAP_MAX_TASKS_PER_DISPATCH`** (default 1000) e atualiza `IngestionState` por partição.
+
 O timer **`ceap_api_2026_dispatcher`** (agenda em **`CEAP_API_2026_DISPATCH_SCHEDULE`**, predefinição a cada 20 minutos, UTC) escolhe o modo pela **data UTC**:
 
 | Situação | Modo | Meses enfileirados | `pipeline_run_id` (exemplo) |
@@ -26,7 +31,7 @@ O dispatcher usa **lock** na tabela de controlo (`PartitionKey=_locks`, `RowKey=
 
 | Componente | Função |
 |------------|--------|
-| `ceap_api_2026_dispatcher` | Timer: lista deputados (API) com cursor; enfileira até **`CEAP_MAX_TASKS_PER_DISPATCH`** mensagens por execução (fallback: `CEAP_DISPATCH_MAX_MESSAGES`). Atualiza corridas em `_runs` e estado das partições em **IngestionState**. |
+| `ceap_api_2026_dispatcher` | Timer: garante snapshot diário de `/deputados` em Raw + `IngestionControlApi2026._snapshots` (reusa quando `COMPLETED`); depois enfileira até **`CEAP_MAX_TASKS_PER_DISPATCH`** mensagens por execução (fallback: `CEAP_DISPATCH_MAX_MESSAGES`). Atualiza corridas em `_runs` e estado das partições em **IngestionState**. |
 | `ceap_api_2026_worker` | Queue trigger: uma mensagem = deputado + ano + mês + `mode` + `pipeline_run_id`; paginação; checkpoint na **IngestionState**; grava Raw com caminho por run. |
 | `ceap_api_2026_poison_handler` | Queue trigger na fila poison: marca a partição como **`POISON`** na **IngestionState** e incrementa falhas no run automatizado quando aplicável. |
 | `fn_replay_ceap_failed_messages` | HTTP (`authLevel=function`, rota `replay/ceap-api-2026`): reenfileira partições a partir da **IngestionState** (não usa a tabela de unidades antiga). |
@@ -46,8 +51,9 @@ O dispatcher usa **lock** na tabela de controlo (`PartitionKey=_locks`, `RowKey=
 | `CEAP_RECONCILIATION_DAY` | Dia UTC dedicado à reconciliação mensual (default 25). |
 | `CEAP_DAILY_LOOKBACK_MONTHS` | Quantos meses para trás incluir na janela daily (default 1). |
 | `CEAP_STALE_AFTER_MINUTES` | Janela para considerar `QUEUED`/`RUNNING` como órfãos (default 60; em dev pode usar 5 para teste rápido). |
+| `CEAP_REFERENCE_TIMEZONE` | Fuso usado só no segmento `reference_date` dos blobs Raw de deputados (default `America/Sao_Paulo`). O modo daily/reconciliation continua por **data UTC**. |
 | `CEAP_RECONCILIATION_START_MONTH` | Primeiro mês na reconciliação (default 1). |
-| `CEAP_MAX_TASKS_PER_DISPATCH` | Limite de mensagens criadas por execução do dispatcher (default recomendado 1000). |
+| `CEAP_MAX_TASKS_PER_DISPATCH` | Limite de mensagens de despesas (CEAP) enfileiradas por execução do dispatcher (default 1000). Não afeta a coleta do snapshot de deputados. |
 | `CEAP_API_QUEUE_NAME` / `CEAP_API_POISON_QUEUE_NAME` | Nomes das filas. |
 | `INGESTION_STATE_TABLE` / `INGESTION_CONTROL_TABLE` | Nomes das tabelas (se sobrespostos no ambiente). |
 | `CEAP_REPROCESS_QUEUE` | Se `true`, o worker pode voltar a processar uma partição já `SUCCESS` para o mesmo `pipeline_run_id` (uso raro). |
@@ -74,8 +80,50 @@ O dispatcher também grava snapshots da listagem de deputados (fonte de dispatch
 
 ```text
 raw/camara/deputados/api/list/reference_date={YYYY-MM-DD}/
-  pipeline_run_id={pipeline_run_id}/execution_id={dispatch_execution_id}/page_{n}.json
+  pipeline_run_id={pipeline_run_id}/execution_id={snapshot_execution_id}/page_{n}.json
+  metadata.json
+  _SUCCESS                       # apenas quando o snapshot fica completo
 ```
+
+O `{YYYY-MM-DD}` é a **data civil** no fuso `CEAP_REFERENCE_TIMEZONE` (predefinição `America/Sao_Paulo`), não a data UTC — assim as pastas alinham com o calendário brasileiro. O `snapshot_execution_id` é estável dentro do mesmo `pipeline_run_id` (todas as páginas do mesmo run vão para a mesma subpasta `execution_id=...`, mesmo quando o dispatcher percorre a paginação ao longo de múltiplos ticks).
+
+### Validação de snapshot de deputados
+
+Em cada tick o dispatcher escreve/atualiza `metadata.json` no nível `reference_date={YYYY-MM-DD}/` com o estado corrente. Quando a paginação do `/deputados` chega ao fim (resposta vazia), além de gravar a `metadata.json` com `status=COMPLETED`, é criado o marcador `_SUCCESS` na mesma pasta.
+
+Campos do `metadata.json`:
+
+| Campo | Descrição |
+|-------|-----------|
+| `endpoint` | Sempre `deputados`. |
+| `reference_date` | Data civil (`CEAP_REFERENCE_TIMEZONE`) usada na pasta. |
+| `reference_timezone` | Fuso aplicado para gerar `reference_date`. |
+| `pipeline_run_id` | Run que gerou esta cópia. |
+| `execution_id` | `snapshot_execution_id` (subpasta `execution_id=...`). |
+| `status` | `IN_PROGRESS` ou `COMPLETED`. |
+| `total_pages` / `record_count` | Acumulado do snapshot. |
+| `files_written` | Igual a `total_pages` quando o snapshot está consistente. |
+| `started_at` / `completed_at` | Marcas temporais (ISO UTC) do run. |
+| `error_message` | Em branco quando não há falha. |
+
+Um snapshot só é considerado **válido para consumo** quando, simultaneamente:
+
+- existe `_SUCCESS` na pasta `reference_date={YYYY-MM-DD}/`;
+- `metadata.status = COMPLETED`;
+- `record_count > 0`;
+- `total_pages > 0`;
+- `files_written == total_pages`.
+
+Se a pasta da data corrente não cumpre todos esses critérios, o dispatcher **não** a usa como referência: emite `warning` e procura a pasta `reference_date=...` mais recente que satisfaça as regras acima como **fallback**. O run no `IngestionControlApi2026._runs` regista a escolha:
+
+| Campo no run | Significado |
+|---------------|-------------|
+| `deputies_pages_written` / `deputies_records_count` | Acumulado escrito para o snapshot do dia atual (mesmo que ainda incompleto). |
+| `deputies_snapshot_status` | `IN_PROGRESS` enquanto o dispatcher está a paginar; `COMPLETED` após `_SUCCESS`. |
+| `deputies_snapshot_first_execution_id` | `snapshot_execution_id` do snapshot que está a ser construído. |
+| `deputies_snapshot_date` / `deputies_snapshot_path` / `deputies_snapshot_record_count` | Apontam para o snapshot **válido** que o run usa como referência (corrente quando completo, ou fallback). |
+| `deputies_snapshot_source` | `current_run`, `fallback_completed` ou `none`. |
+| `deputies_snapshot_completed_at` | Carimbo do momento em que `_SUCCESS` foi escrito. |
 
 ## Consultar logs (Application Insights)
 
@@ -97,8 +145,41 @@ Filtrar por `status` em **`FAILED`**, **`POISON`**, ou inspeccionar **`RUNNING`*
 ## Consultar IngestionControlApi2026 (corridas e lock)
 
 - Mesma storage → Tabela `IngestionControlApi2026`.
-- **`PartitionKey=_runs`**, **`RowKey`**: `ceap_daily_YYYYMMDD` ou `ceap_reconciliation_YYYYMMDD` — estado da corrida (`status`, `total_tasks_queued`, `total_tasks_expected`, `total_tasks_success`, `total_tasks_failed`, cursores `next_pagina`, `next_idx`, `next_month_idx`, `enqueue_phase_complete`).
+- **`PartitionKey=_runs`**, **`RowKey`**: `ceap_daily_YYYYMMDD` ou `ceap_reconciliation_YYYYMMDD` — resumo consolidado da corrida.
+  - Campos: `run_type`, `status`, `target_year`, `months_to_process`, `enqueue_phase_complete`, `total_tasks_expected`, `total_tasks_queued`, `total_tasks_success`, `total_tasks_failed`, `total_tasks_running`, `total_tasks_pending`, `total_tasks_poison`, `started_at`, `updated_at`, `completed_at`, `last_error`, cursores `next_pagina`, `next_idx`, `next_month_idx`.
+  - Campos do snapshot de deputados: `deputies_pages_written`, `deputies_records_count`, `deputies_snapshot_status`, `deputies_snapshot_first_execution_id`, `deputies_snapshot_date`, `deputies_snapshot_path`, `deputies_snapshot_record_count`, `deputies_snapshot_source` (`reused_today` | `reused_fallback` | `created_today` | `none`), `deputies_snapshot_completed_at`.
+  - Status possíveis: `STARTED`, `QUEUING`, `QUEUED`, `RUNNING`, `COMPLETED`, `PARTIAL`, `FAILED`.
+  - **Sucesso confirmado** apenas quando: `status=COMPLETED`, `total_tasks_success == total_tasks_expected`, `total_tasks_failed=0`, `total_tasks_poison=0`, `total_tasks_running=0`, `total_tasks_pending=0`.
 - **`PartitionKey=_locks`**, **`RowKey=ceap_dispatcher_lock`** — lock ativo do dispatcher (`locked_until`, `locked_by`).
+- **`PartitionKey=_snapshots`**, **`RowKey=deputados_YYYYMMDD`** — controle do snapshot diário de `/deputados` (independente do run CEAP).
+  - Campos: `endpoint=deputados`, `reference_date`, `status` (`IN_PROGRESS` | `COMPLETED` | `FAILED`), `pipeline_run_id`, `execution_id`, `started_at`, `completed_at`, `total_pages`, `record_count`, `raw_path`, `last_error`, `updated_at`.
+  - O dispatcher só **reaproveita** o snapshot quando: `status=COMPLETED`, `record_count>0`, `total_pages>0`, `raw_path` preenchido **e** o marcador `_SUCCESS` existe em `raw_path/_SUCCESS`.
+  - O modo `daily` reusa o snapshot do dia atual; se não existir, cria um novo.
+  - O modo `reconciliation` reusa o snapshot completo mais recente (com `reference_date < hoje`) quando o do dia atual ainda não está completo; se nenhum estiver válido, cria um novo antes da Fase B.
+
+### Verificar conclusão com um único comando
+
+Daily:
+
+```bash
+az storage entity query \
+  --account-name <storage_account> \
+  --table-name IngestionControlApi2026 \
+  --auth-mode key \
+  --filter "PartitionKey eq '_runs' and RowKey eq 'ceap_daily_YYYYMMDD'" \
+  -o table
+```
+
+Reconciliation:
+
+```bash
+az storage entity query \
+  --account-name <storage_account> \
+  --table-name IngestionControlApi2026 \
+  --auth-mode key \
+  --filter "PartitionKey eq '_runs' and RowKey eq 'ceap_reconciliation_YYYYMMDD'" \
+  -o table
+```
 
 ## Verificar poison queue
 

@@ -24,10 +24,16 @@ def pipeline_run_updates_registry(pipeline_run_id: str) -> bool:
 class CeapRunRegistry:
     PARTITION_RUNS = "_runs"
     PARTITION_LOCKS = "_locks"
+    PARTITION_SNAPSHOTS = "_snapshots"
     ROW_LOCK = "ceap_dispatcher_lock"
 
     def __init__(self, table_client: TableClient) -> None:
         self.table_client = table_client
+
+    @staticmethod
+    def snapshot_row_key(reference_date: str) -> str:
+        compact = (reference_date or "").replace("-", "")
+        return f"deputados_{compact}"
 
     @classmethod
     def from_connection_string(cls, conn_str: str, table_name: str) -> CeapRunRegistry:
@@ -112,6 +118,53 @@ class CeapRunRegistry:
             },
             mode="merge",
         )
+
+    def get_snapshot(self, reference_date: str) -> dict[str, Any] | None:
+        rk = self.snapshot_row_key(reference_date)
+        try:
+            return dict(
+                self.table_client.get_entity(
+                    partition_key=self.PARTITION_SNAPSHOTS, row_key=rk
+                )
+            )
+        except ResourceNotFoundError:
+            return None
+
+    def upsert_snapshot(self, reference_date: str, fields: dict[str, Any]) -> None:
+        rk = self.snapshot_row_key(reference_date)
+        entity: dict[str, Any] = {
+            "PartitionKey": self.PARTITION_SNAPSHOTS,
+            "RowKey": rk,
+            "endpoint": "deputados",
+            "reference_date": reference_date,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            **{k: v for k, v in fields.items() if v is not None},
+        }
+        self.table_client.upsert_entity(entity=entity, mode="merge")
+
+    def find_latest_completed_snapshot_record(
+        self, *, before_reference_date: str | None = None
+    ) -> dict[str, Any] | None:
+        """Returns the most recent ``_snapshots`` record whose ``status == 'COMPLETED'``.
+
+        If ``before_reference_date`` is provided, snapshots whose ``reference_date >=`` that
+        value are excluded (used for fallback when today's snapshot is incomplete).
+        """
+        flt = (
+            f"PartitionKey eq '{self.PARTITION_SNAPSHOTS}' and endpoint eq 'deputados'"
+        )
+        candidates: list[dict[str, Any]] = []
+        for ent in self.table_client.list_entities(query_filter=flt):
+            if str(ent.get("status", "")).upper() != "COMPLETED":
+                continue
+            ref_dt = str(ent.get("reference_date", ""))
+            if before_reference_date and ref_dt >= before_reference_date:
+                continue
+            candidates.append(dict(ent))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda e: str(e.get("reference_date", "")), reverse=True)
+        return candidates[0]
 
     def merge_run_counters(
         self,
