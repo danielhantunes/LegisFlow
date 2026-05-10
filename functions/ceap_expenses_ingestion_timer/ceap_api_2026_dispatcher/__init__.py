@@ -33,7 +33,15 @@ from shared.dispatch_months import (
     months_reconciliation_window,
 )
 from shared.logger import get_logger, log_structured
-from shared.queue_helpers import send_json_message
+from shared.queue_helpers import (
+    prepare_queue_client_for_dispatch,
+    send_json_message_with_client,
+)
+from shared.ceap_raw_manifest import (
+    build_ceap_dispatcher_run_metadata,
+    ceap_run_metadata_path,
+    persist_ceap_dispatcher_run_metadata,
+)
 from shared.work_message import CeapApiWorkMessage
 
 logger = get_logger()
@@ -226,6 +234,8 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     stale_queued_reenqueued = 0
     stale_running_reenqueued = 0
     skipped_future_months = 0
+    abort_enqueue = False
+    enqueue_abort_error: BaseException | None = None
 
     try:
         log_structured(
@@ -673,7 +683,81 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             1, (total_deputies + _DEPUTIES_CHUNK_SIZE - 1) // _DEPUTIES_CHUNK_SIZE
         ) if total_deputies > 0 else 0
 
-        while remaining > 0 and total_deputies > 0:
+        months_payload_json = json.dumps(month_list)
+        run_for_ceap_manifest = registry.get_run(pipeline_run_id) or {}
+        started_manifest_utc = str(run_for_ceap_manifest.get("started_at") or now.isoformat())
+        manifest_path_early = ceap_run_metadata_path(pipeline_run_id)
+
+        if total_deputies > 0:
+            try:
+                init_ceap_meta = build_ceap_dispatcher_run_metadata(
+                    pipeline_run_id=pipeline_run_id,
+                    mode=mode,
+                    status="RUNNING",
+                    started_at_utc=started_manifest_utc,
+                    finished_at_utc=None,
+                    failed_at_utc=None,
+                    total_tasks_expected=int(
+                        run_for_ceap_manifest.get("total_tasks_expected", 0) or 0
+                    ),
+                    total_tasks_queued=total_queued,
+                    total_tasks_pending=0,
+                    target_year=target_year,
+                    months_to_process_json=months_payload_json,
+                    enqueue_phase_complete=False,
+                    deputies_snapshot_date=snapshot_in_use_date,
+                    deputies_snapshot_path=snapshot_in_use_path,
+                    deputies_snapshot_record_count=snapshot_in_use_record_count,
+                    deputies_snapshot_status=snapshot_status_value,
+                    total_tasks_success=int(
+                        run_for_ceap_manifest.get("total_tasks_success", 0) or 0
+                    ),
+                    total_tasks_failed=int(
+                        run_for_ceap_manifest.get("total_tasks_failed", 0) or 0
+                    ),
+                    total_tasks_poison=int(
+                        run_for_ceap_manifest.get("total_tasks_poison", 0) or 0
+                    ),
+                    total_tasks_running=int(
+                        run_for_ceap_manifest.get("total_tasks_running", 0) or 0
+                    ),
+                )
+                mp_initial, _ = persist_ceap_dispatcher_run_metadata(
+                    raw_writer,
+                    init_ceap_meta,
+                    write_success_marker_now=False,
+                )
+                log_structured(
+                    logger,
+                    "info",
+                    "CEAP run manifest initial persisted in raw.",
+                    pipeline_run_id=pipeline_run_id,
+                    manifest_path=mp_initial,
+                    mode=mode,
+                )
+            except Exception as mw_err:
+                log_structured(
+                    logger,
+                    "warning",
+                    "Failed to persist CEAP run manifest in raw.",
+                    pipeline_run_id=pipeline_run_id,
+                    manifest_path=manifest_path_early,
+                    mode=mode,
+                    manifest_stage="initial",
+                    error=str(mw_err),
+                    error_type=type(mw_err).__name__,
+                )
+
+        queue_client = None
+        if total_deputies > 0:
+            queue_client = prepare_queue_client_for_dispatch(
+                queue_name,
+                logger=logger,
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+            )
+
+        while remaining > 0 and total_deputies > 0 and not abort_enqueue:
             start_idx = (pagina - 1) * _DEPUTIES_CHUNK_SIZE
             if start_idx >= total_deputies:
                 registry.upsert_run(
@@ -698,7 +782,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             end_idx = min(start_idx + _DEPUTIES_CHUNK_SIZE, total_deputies)
             chunk = deputies[start_idx:end_idx]
 
-            while idx < len(chunk) and remaining > 0:
+            while idx < len(chunk) and remaining > 0 and not abort_enqueue:
                 try:
                     dep_id = int(chunk[idx]["id"])
                 except (KeyError, TypeError, ValueError):
@@ -706,7 +790,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     month_idx = 0
                     continue
 
-                while month_idx < len(month_list) and remaining > 0:
+                while month_idx < len(month_list) and remaining > 0 and not abort_enqueue:
                     mes = month_list[month_idx]
                     if mes > max_m:
                         skipped_future_months += 1
@@ -740,7 +824,23 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                         pipeline_run_id=pipeline_run_id,
                         dispatched_at=dispatched_at,
                     )
-                    send_json_message(queue_name, wm.to_json())
+                    assert queue_client is not None
+                    try:
+                        send_json_message_with_client(
+                            queue_client,
+                            wm.to_json(),
+                            logger=logger,
+                            pipeline_run_id=pipeline_run_id,
+                            mode=mode,
+                            queue_name=queue_name,
+                            id_deputado=dep_id,
+                            ano=target_year,
+                            mes=mes,
+                        )
+                    except Exception as send_err:
+                        enqueue_abort_error = send_err
+                        abort_enqueue = True
+                        break
 
                     prev_pid = str(part.get("current_pipeline_run_id", "")) if part else ""
                     stale_requeue_count = int(part.get("stale_requeue_count", 0) or 0) if part else 0
@@ -783,9 +883,15 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     total_queued += 1
                     month_idx += 1
 
+                if abort_enqueue:
+                    break
+
                 if month_idx >= len(month_list):
                     month_idx = 0
                     idx += 1
+
+            if abort_enqueue:
+                break
 
             if idx >= len(chunk):
                 pagina += 1
@@ -806,8 +912,133 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             if remaining == 0:
                 break
 
+        if abort_enqueue and enqueue_abort_error is not None:
+            et = type(enqueue_abort_error).__name__
+            emessage = str(enqueue_abort_error)
+            pause_status = "PARTIAL" if total_queued > 0 else "FAILED"
+            raw_manifest_fail_status = (
+                "PARTIALLY_COMPLETED" if total_queued > 0 else "FAILED"
+            )
+            log_structured(
+                logger,
+                "error",
+                "Enqueue phase aborted after queue send failure; run will resume on next tick.",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                enqueue_aborted=True,
+                error_type=et,
+                error_message=emessage,
+                total_queued=total_queued,
+                queued_this_tick=queued_this_tick,
+                remaining=remaining,
+                next_pagina=pagina,
+                next_idx=idx,
+                next_month_idx=month_idx,
+            )
+            try:
+                registry.upsert_run(
+                    {
+                        "pipeline_run_id": pipeline_run_id,
+                        "status": pause_status,
+                        "enqueue_phase_complete": False,
+                        "next_pagina": pagina,
+                        "next_idx": idx,
+                        "next_month_idx": month_idx,
+                        "total_tasks_queued": total_queued,
+                        "last_error": f"{et}: {emessage}",
+                        "error_type": et,
+                        "error_message": emessage,
+                        "failed_at": datetime.now(UTC).isoformat(),
+                        "queued_this_tick": queued_this_tick,
+                        "remaining": remaining,
+                    }
+                )
+            except Exception as upsert_err:
+                log_structured(
+                    logger,
+                    "error",
+                    "Failed to persist PARTIAL/FAILED state after enqueue abort.",
+                    pipeline_run_id=pipeline_run_id,
+                    error=str(upsert_err),
+                    error_type=type(upsert_err).__name__,
+                )
+
+            failed_wall = datetime.now(UTC).isoformat()
+            abort_manifest_path_default = manifest_path_early
+            try:
+                rrf_abort = registry.get_run(pipeline_run_id) or {}
+                pc_abort = parts.count_statuses_by_run(pipeline_run_id)
+                te_abort = int(rrf_abort.get("total_tasks_expected", 0) or 0)
+                if te_abort <= 0:
+                    te_abort = (
+                        pc_abort["queued"]
+                        + pc_abort["running"]
+                        + pc_abort["success"]
+                        + pc_abort["failed"]
+                        + pc_abort["pending"]
+                        + pc_abort["poison"]
+                        + pc_abort["stale"]
+                        + pc_abort["other"]
+                    )
+                tp_abort = int(pc_abort.get("pending", 0) or 0)
+
+                abort_meta = build_ceap_dispatcher_run_metadata(
+                    pipeline_run_id=pipeline_run_id,
+                    mode=mode,
+                    status=raw_manifest_fail_status,
+                    started_at_utc=str(rrf_abort.get("started_at") or started_manifest_utc),
+                    finished_at_utc=None,
+                    failed_at_utc=failed_wall,
+                    total_tasks_expected=te_abort,
+                    total_tasks_queued=total_queued,
+                    total_tasks_pending=tp_abort,
+                    target_year=target_year,
+                    months_to_process_json=months_payload_json,
+                    enqueue_phase_complete=False,
+                    deputies_snapshot_date=snapshot_in_use_date,
+                    deputies_snapshot_path=snapshot_in_use_path,
+                    deputies_snapshot_record_count=snapshot_in_use_record_count,
+                    deputies_snapshot_status=snapshot_status_value,
+                    error_type=et,
+                    error_message=emessage,
+                    total_tasks_success=int(rrf_abort.get("total_tasks_success", 0) or 0),
+                    total_tasks_failed=int(rrf_abort.get("total_tasks_failed", 0) or 0),
+                    total_tasks_poison=int(rrf_abort.get("total_tasks_poison", 0) or 0),
+                    total_tasks_running=int(rrf_abort.get("total_tasks_running", 0) or 0),
+                )
+                mp_fail, _ = persist_ceap_dispatcher_run_metadata(
+                    raw_writer,
+                    abort_meta,
+                    write_success_marker_now=False,
+                )
+                log_structured(
+                    logger,
+                    "warning",
+                    "CEAP run manifest updated as failed in raw.",
+                    pipeline_run_id=pipeline_run_id,
+                    manifest_path=mp_fail,
+                    mode=mode,
+                    manifest_status=raw_manifest_fail_status,
+                    error_type=et,
+                    error_message=emessage,
+                )
+            except Exception as raw_abort_err:
+                log_structured(
+                    logger,
+                    "warning",
+                    "Failed to persist CEAP run manifest in raw.",
+                    pipeline_run_id=pipeline_run_id,
+                    manifest_path=abort_manifest_path_default,
+                    mode=mode,
+                    manifest_stage="enqueue_abort_failure",
+                    error=str(raw_abort_err),
+                    error_type=type(raw_abort_err).__name__,
+                )
+
         enqueue_walked_full_list = (
-            total_deputies > 0 and (pagina - 1) * _DEPUTIES_CHUNK_SIZE >= total_deputies
+            (not abort_enqueue)
+            and total_deputies > 0
+            and (pagina - 1) * _DEPUTIES_CHUNK_SIZE >= total_deputies
         )
 
         log_structured(
@@ -825,6 +1056,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             total_deputies=total_deputies,
             snapshot_pages=snapshot_pages,
             enqueue_walked_full_list=enqueue_walked_full_list,
+            enqueue_aborted=abort_enqueue,
             snapshot_reused=snapshot_reused,
             snapshot_created=snapshot_created,
             snapshot_in_use_source=snapshot_in_use_source,
@@ -862,6 +1094,9 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         if idle_ticks >= _IDLE_TICKS_ENQUEUE_DONE:
             enqueue_complete = True
 
+        if abort_enqueue:
+            enqueue_complete = False
+
         partition_counts = parts.count_statuses_by_run(pipeline_run_id)
         total_tasks_success = partition_counts["success"]
         total_tasks_failed = partition_counts["failed"]
@@ -896,107 +1131,157 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
 
         completed_at_iso: str | None = None
         last_error_text: str | None = None
-        if (
-            enqueue_complete
-            and total_tasks_expected > 0
-            and total_tasks_success == total_tasks_expected
-            and total_tasks_failed == 0
-            and total_tasks_poison == 0
-            and total_tasks_running == 0
-            and total_tasks_queued_state == 0
-            and total_tasks_pending == 0
-        ):
-            run_status = "COMPLETED"
-            completed_at_iso = datetime.now(UTC).isoformat()
-            last_error_text = ""
-        elif enqueue_complete and total_tasks_expected == 0 and total_queued == 0:
-            run_status = "COMPLETED"
-            completed_at_iso = datetime.now(UTC).isoformat()
-            last_error_text = ""
-        elif enqueue_complete and all_finished and (total_tasks_failed > 0 or total_tasks_poison > 0):
-            run_status = "PARTIAL" if total_tasks_success > 0 else "FAILED"
-            completed_at_iso = datetime.now(UTC).isoformat()
-            last_error_text = (
-                f"failed={total_tasks_failed}, poison={total_tasks_poison}"
-            )
-        elif total_tasks_running > 0:
-            run_status = "RUNNING"
-        elif enqueue_complete:
-            run_status = "QUEUED"
-        else:
-            run_status = "QUEUING"
+        run_status = str(run_refresh.get("status", "QUEUING"))
 
-        log_structured(
-            logger,
-            "info",
-            "[BEFORE_FINAL_UPSERT]",
-            pipeline_run_id=pipeline_run_id,
-            mode=mode,
-            upsert_stage="final_summary",
-            run_status=run_status,
-            enqueue_phase_complete=enqueue_complete,
-            total_tasks_expected=total_tasks_expected,
-            total_tasks_queued=total_queued,
-            total_tasks_success=total_tasks_success,
-            total_tasks_failed=total_tasks_failed,
-            total_tasks_running=total_tasks_running,
-            total_tasks_pending=total_tasks_pending,
-            total_tasks_poison=total_tasks_poison,
-        )
-
-        previous_status = str(run_refresh.get("status", "")).upper()
-        previous_last_error = str(run_refresh.get("last_error", "") or "")
-        previous_failed_at = str(run_refresh.get("failed_at", "") or "")
-
-        upsert_payload: dict[str, Any] = {
-            "pipeline_run_id": pipeline_run_id,
-            "run_type": mode,
-            "idle_enqueue_ticks": idle_ticks,
-            "enqueue_phase_complete": enqueue_complete,
-            "total_tasks_expected": total_tasks_expected,
-            "total_tasks_queued": total_queued,
-            "total_tasks_success": total_tasks_success,
-            "total_tasks_failed": total_tasks_failed,
-            "total_tasks_running": total_tasks_running,
-            "total_tasks_pending": total_tasks_pending,
-            "total_tasks_poison": total_tasks_poison,
-            "status": run_status,
-            "deputies_pages_written": total_dep_pages,
-            "deputies_records_count": total_dep_records,
-            "deputies_snapshot_status": snapshot_status_value,
-            "deputies_snapshot_first_execution_id": snapshot_execution_id,
-            "deputies_snapshot_date": snapshot_in_use_date,
-            "deputies_snapshot_path": snapshot_in_use_path,
-            "deputies_snapshot_record_count": snapshot_in_use_record_count,
-            "deputies_snapshot_source": snapshot_in_use_source,
-        }
-        if snapshot_completed_at:
-            upsert_payload["deputies_snapshot_completed_at"] = snapshot_completed_at
-        if completed_at_iso is not None:
-            upsert_payload["completed_at"] = completed_at_iso
-        if last_error_text is not None:
-            upsert_payload["last_error"] = last_error_text
-        if run_status == "COMPLETED":
-            # Run recovered/finished successfully: clear failure markers from previous attempts.
-            upsert_payload["failed_at"] = ""
-            upsert_payload["last_error"] = ""
+        if not abort_enqueue:
             if (
-                previous_failed_at
-                or previous_last_error
-                or previous_status in {"FAILED", "PARTIAL"}
+                enqueue_complete
+                and total_tasks_expected > 0
+                and total_tasks_success == total_tasks_expected
+                and total_tasks_failed == 0
+                and total_tasks_poison == 0
+                and total_tasks_running == 0
+                and total_tasks_queued_state == 0
+                and total_tasks_pending == 0
             ):
-                upsert_payload["last_recovered_at"] = datetime.now(UTC).isoformat()
+                run_status = "COMPLETED"
+                completed_at_iso = datetime.now(UTC).isoformat()
+                last_error_text = ""
+            elif enqueue_complete and total_tasks_expected == 0 and total_queued == 0:
+                run_status = "COMPLETED"
+                completed_at_iso = datetime.now(UTC).isoformat()
+                last_error_text = ""
+            elif enqueue_complete and all_finished and (total_tasks_failed > 0 or total_tasks_poison > 0):
+                run_status = "PARTIAL" if total_tasks_success > 0 else "FAILED"
+                completed_at_iso = datetime.now(UTC).isoformat()
+                last_error_text = (
+                    f"failed={total_tasks_failed}, poison={total_tasks_poison}"
+                )
+            elif total_tasks_running > 0:
+                run_status = "RUNNING"
+            elif enqueue_complete:
+                run_status = "QUEUED"
+            else:
+                run_status = "QUEUING"
 
-        registry.upsert_run(upsert_payload)
-        log_structured(
-            logger,
-            "info",
-            "[AFTER_FINAL_UPSERT]",
-            pipeline_run_id=pipeline_run_id,
-            mode=mode,
-            upsert_stage="final_summary",
-            run_status=run_status,
-        )
+            log_structured(
+                logger,
+                "info",
+                "[BEFORE_FINAL_UPSERT]",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                upsert_stage="final_summary",
+                run_status=run_status,
+                enqueue_phase_complete=enqueue_complete,
+                total_tasks_expected=total_tasks_expected,
+                total_tasks_queued=total_queued,
+                total_tasks_success=total_tasks_success,
+                total_tasks_failed=total_tasks_failed,
+                total_tasks_running=total_tasks_running,
+                total_tasks_pending=total_tasks_pending,
+                total_tasks_poison=total_tasks_poison,
+            )
+
+            previous_status = str(run_refresh.get("status", "")).upper()
+            previous_last_error = str(run_refresh.get("last_error", "") or "")
+            previous_failed_at = str(run_refresh.get("failed_at", "") or "")
+
+            upsert_payload: dict[str, Any] = {
+                "pipeline_run_id": pipeline_run_id,
+                "run_type": mode,
+                "idle_enqueue_ticks": idle_ticks,
+                "enqueue_phase_complete": enqueue_complete,
+                "total_tasks_expected": total_tasks_expected,
+                "total_tasks_queued": total_queued,
+                "total_tasks_success": total_tasks_success,
+                "total_tasks_failed": total_tasks_failed,
+                "total_tasks_running": total_tasks_running,
+                "total_tasks_pending": total_tasks_pending,
+                "total_tasks_poison": total_tasks_poison,
+                "status": run_status,
+                "deputies_pages_written": total_dep_pages,
+                "deputies_records_count": total_dep_records,
+                "deputies_snapshot_status": snapshot_status_value,
+                "deputies_snapshot_first_execution_id": snapshot_execution_id,
+                "deputies_snapshot_date": snapshot_in_use_date,
+                "deputies_snapshot_path": snapshot_in_use_path,
+                "deputies_snapshot_record_count": snapshot_in_use_record_count,
+                "deputies_snapshot_source": snapshot_in_use_source,
+            }
+            if snapshot_completed_at:
+                upsert_payload["deputies_snapshot_completed_at"] = snapshot_completed_at
+            if completed_at_iso is not None:
+                upsert_payload["completed_at"] = completed_at_iso
+            if last_error_text is not None:
+                upsert_payload["last_error"] = last_error_text
+            if run_status == "COMPLETED":
+                # Run recovered/finished successfully: clear failure markers from previous attempts.
+                upsert_payload["failed_at"] = ""
+                upsert_payload["last_error"] = ""
+                if (
+                    previous_failed_at
+                    or previous_last_error
+                    or previous_status in {"FAILED", "PARTIAL"}
+                ):
+                    upsert_payload["last_recovered_at"] = datetime.now(UTC).isoformat()
+
+            registry.upsert_run(upsert_payload)
+            log_structured(
+                logger,
+                "info",
+                "[AFTER_FINAL_UPSERT]",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                upsert_stage="final_summary",
+                run_status=run_status,
+            )
+        else:
+            log_structured(
+                logger,
+                "info",
+                "[BEFORE_FINAL_UPSERT]",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                upsert_stage="post_abort_counters",
+                run_status=str(run_refresh.get("status", "")),
+                enqueue_aborted=True,
+                total_tasks_expected=total_tasks_expected,
+                total_tasks_success=total_tasks_success,
+                total_tasks_failed=total_tasks_failed,
+            )
+            try:
+                registry.upsert_run(
+                    {
+                        "pipeline_run_id": pipeline_run_id,
+                        "idle_enqueue_ticks": idle_ticks,
+                        "enqueue_phase_complete": False,
+                        "total_tasks_expected": total_tasks_expected,
+                        "total_tasks_success": total_tasks_success,
+                        "total_tasks_failed": total_tasks_failed,
+                        "total_tasks_running": total_tasks_running,
+                        "total_tasks_pending": total_tasks_pending,
+                        "total_tasks_poison": total_tasks_poison,
+                    }
+                )
+            except Exception as counter_err:
+                log_structured(
+                    logger,
+                    "warning",
+                    "Failed merge of partition counters after enqueue abort.",
+                    pipeline_run_id=pipeline_run_id,
+                    error=str(counter_err),
+                    error_type=type(counter_err).__name__,
+                )
+            log_structured(
+                logger,
+                "info",
+                "[AFTER_FINAL_UPSERT]",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                upsert_stage="post_abort_counters",
+                run_status=str(run_refresh.get("status", "")),
+                enqueue_aborted=True,
+            )
 
         log_structured(
             logger,
@@ -1019,11 +1304,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         final_status = str(run_done.get("status", ""))
         total_deputados = _deputados_total_hint(hint_payload)
 
-        # Write Raw run manifest for downstream Bronze orchestration.
-        raw_base_path = "raw/camara/ceap/api/despesas"
-        run_meta_prefix = (
-            f"{raw_base_path}/_metadata/runs/pipeline_run_id={pipeline_run_id}"
-        )
+        # Write Raw run manifest for downstream Bronze orchestration (metadata.json).
         strict_completed = (
             bool(run_done.get("enqueue_phase_complete"))
             and int(run_done.get("total_tasks_expected", 0) or 0)
@@ -1033,51 +1314,105 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             and int(run_done.get("total_tasks_poison", 0) or 0) == 0
             and int(run_done.get("total_tasks_running", 0) or 0) == 0
         )
-        run_summary_payload: dict[str, Any] = {
-            "pipeline_run_id": pipeline_run_id,
-            "run_type": mode,
-            "status": final_status,
-            "target_year": target_year,
-            "months_to_process": run_done.get("months_to_process")
-            or json.dumps(month_list),
-            "started_at": run_done.get("started_at") or now.isoformat(),
-            "completed_at": run_done.get("completed_at") or completed_at_iso or "",
-            "total_tasks_expected": int(run_done.get("total_tasks_expected", 0) or 0),
-            "total_tasks_queued": int(run_done.get("total_tasks_queued", 0) or 0),
-            "total_tasks_success": int(run_done.get("total_tasks_success", 0) or 0),
-            "total_tasks_failed": int(run_done.get("total_tasks_failed", 0) or 0),
-            "total_tasks_pending": int(run_done.get("total_tasks_pending", 0) or 0),
-            "total_tasks_poison": int(run_done.get("total_tasks_poison", 0) or 0),
-            "total_tasks_running": int(run_done.get("total_tasks_running", 0) or 0),
-            "enqueue_phase_complete": bool(run_done.get("enqueue_phase_complete")),
-            "deputies_snapshot_date": run_done.get("deputies_snapshot_date")
-            or snapshot_in_use_date,
-            "deputies_snapshot_path": run_done.get("deputies_snapshot_path")
-            or snapshot_in_use_path,
-            "deputies_snapshot_record_count": int(
-                run_done.get("deputies_snapshot_record_count", 0)
-                or snapshot_in_use_record_count
-                or 0
-            ),
-            "deputies_snapshot_status": run_done.get("deputies_snapshot_status")
-            or snapshot_status_value,
-            "raw_base_path": raw_base_path,
-            "created_at": datetime.now(UTC).isoformat(),
-        }
-        run_summary_path = f"{run_meta_prefix}/run_summary.json"
-        run_success_path = f"{run_meta_prefix}/_SUCCESS"
+        manifest_status_final = str(final_status or "").upper() or "UNKNOWN"
+        fin_iso = str(
+            completed_at_iso or run_done.get("completed_at") or ""
+        ).strip()
+        fai_iso = str(run_done.get("failed_at", "") or "").strip()
+        finished_at_utc_final = (
+            fin_iso
+            if (manifest_status_final == "COMPLETED" and fin_iso)
+            else None
+        )
+        failed_at_utc_final = None
+        if manifest_status_final in ("FAILED", "PARTIAL", "PARTIALLY_COMPLETED"):
+            failed_at_utc_final = fai_iso if fai_iso else None
+
+        months_table_json = (
+            str(run_done.get("months_to_process"))
+            if run_done.get("months_to_process")
+            else months_payload_json
+        )
+        err_type_final = run_done.get("error_type")
+        err_msg_final = run_done.get("last_error")
+        if manifest_status_final == "COMPLETED":
+            err_type_final = None
+            err_msg_final = None
+
+        write_success_now = (
+            manifest_status_final == "COMPLETED" and strict_completed
+        )
+        final_mp_default = ceap_run_metadata_path(pipeline_run_id)
         try:
-            raw_writer.write_json(run_summary_path, run_summary_payload)
-            if final_status == "COMPLETED" and strict_completed:
-                raw_writer.write_text(run_success_path, "")
+            final_ceap_doc = build_ceap_dispatcher_run_metadata(
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                status=manifest_status_final,
+                started_at_utc=str(
+                    run_done.get("started_at") or started_manifest_utc
+                ),
+                finished_at_utc=finished_at_utc_final,
+                failed_at_utc=failed_at_utc_final,
+                total_tasks_expected=int(
+                    run_done.get("total_tasks_expected", 0) or 0
+                ),
+                total_tasks_queued=int(run_done.get("total_tasks_queued", 0) or 0),
+                total_tasks_pending=int(
+                    run_done.get("total_tasks_pending", 0) or 0
+                ),
+                target_year=target_year,
+                months_to_process_json=months_table_json,
+                enqueue_phase_complete=bool(
+                    run_done.get("enqueue_phase_complete")
+                ),
+                deputies_snapshot_date=str(
+                    run_done.get("deputies_snapshot_date")
+                    or snapshot_in_use_date
+                    or ""
+                ),
+                deputies_snapshot_path=str(
+                    run_done.get("deputies_snapshot_path")
+                    or snapshot_in_use_path
+                    or ""
+                ),
+                deputies_snapshot_record_count=int(
+                    run_done.get("deputies_snapshot_record_count", 0)
+                    or snapshot_in_use_record_count
+                    or 0
+                ),
+                deputies_snapshot_status=str(
+                    run_done.get("deputies_snapshot_status")
+                    or snapshot_status_value
+                    or ""
+                ),
+                error_type=str(err_type_final) if err_type_final else None,
+                error_message=str(err_msg_final) if err_msg_final else None,
+                total_tasks_success=int(
+                    run_done.get("total_tasks_success", 0) or 0
+                ),
+                total_tasks_failed=int(
+                    run_done.get("total_tasks_failed", 0) or 0
+                ),
+                total_tasks_poison=int(
+                    run_done.get("total_tasks_poison", 0) or 0
+                ),
+                total_tasks_running=int(
+                    run_done.get("total_tasks_running", 0) or 0
+                ),
+            )
+            mp_fin, _sp_fin = persist_ceap_dispatcher_run_metadata(
+                raw_writer,
+                final_ceap_doc,
+                write_success_marker_now=write_success_now,
+            )
             log_structured(
                 logger,
                 "info",
                 "CEAP run manifest persisted in raw.",
                 pipeline_run_id=pipeline_run_id,
                 mode=mode,
-                run_summary_path=run_summary_path,
-                run_success_path=run_success_path if (final_status == "COMPLETED" and strict_completed) else "",
+                manifest_path=mp_fin,
+                success_marker_written=write_success_now,
                 final_status=final_status,
                 strict_completed=strict_completed,
             )
@@ -1088,7 +1423,8 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 "Failed to persist CEAP run manifest in raw.",
                 pipeline_run_id=pipeline_run_id,
                 mode=mode,
-                run_summary_path=run_summary_path,
+                manifest_path=final_mp_default,
+                manifest_stage="final_summary",
                 final_status=final_status,
                 error=str(manifest_err),
                 error_type=type(manifest_err).__name__,
@@ -1137,6 +1473,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             snapshot_reused=snapshot_reused,
             snapshot_created=snapshot_created,
             ceap_max_tasks_per_dispatch=max_per_tick,
+            enqueue_aborted=abort_enqueue,
         )
         log_structured(
             logger,
@@ -1167,6 +1504,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             deputies_snapshot_path=snapshot_in_use_path,
             deputies_snapshot_record_count=snapshot_in_use_record_count,
             ceap_max_tasks_per_dispatch=max_per_tick,
+            enqueue_aborted=abort_enqueue,
         )
     except Exception as e:
         log_structured(
@@ -1190,14 +1528,129 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 mode=mode,
                 upsert_stage="failed_exception",
             )
-            registry.upsert_run(
-                {
-                    "pipeline_run_id": pipeline_run_id,
-                    "status": "FAILED",
-                    "last_error": f"{type(e).__name__}: {str(e)}",
-                    "failed_at": datetime.now(UTC).isoformat(),
-                }
+            exc_t = type(e).__name__
+            exc_msg = str(e)
+            tq_exc = int(locals().get("total_queued") or 0)
+            qtick_exc = int(locals().get("queued_this_tick") or 0)
+            rem_exc = locals().get("remaining")
+            exc_status = "PARTIAL" if tq_exc > 0 else "FAILED"
+            fail_patch: dict[str, Any] = {
+                "pipeline_run_id": pipeline_run_id,
+                "status": exc_status,
+                "last_error": f"{exc_t}: {exc_msg}",
+                "error_type": exc_t,
+                "error_message": exc_msg,
+                "failed_at": datetime.now(UTC).isoformat(),
+                "total_tasks_queued": tq_exc,
+                "queued_this_tick": qtick_exc,
+                "remaining": rem_exc,
+            }
+            loc = locals()
+            for cursor_key, cursor_var in (
+                ("next_pagina", "pagina"),
+                ("next_idx", "idx"),
+                ("next_month_idx", "month_idx"),
+            ):
+                if cursor_var not in loc:
+                    continue
+                cv = loc[cursor_var]
+                if cv is not None:
+                    fail_patch[cursor_key] = cv
+            registry.upsert_run(fail_patch)
+            fail_wall = str(fail_patch.get("failed_at") or datetime.now(UTC).isoformat())
+            raw_stat_exc = (
+                "PARTIALLY_COMPLETED" if tq_exc > 0 else "FAILED"
             )
+            try:
+                exc_store = os.environ.get("RAW_STORAGE_ACCOUNT_NAME")
+                if exc_store:
+                    loc_exc = locals()
+                    rw_ex = loc_exc.get("raw_writer")
+                    if rw_ex is None:
+                        rw_ex = AdlsRawWriter(account_name=exc_store)
+                    mj_ex = loc_exc.get("months_payload_json") or json.dumps(
+                        month_list
+                    )
+                    r_ent = registry.get_run(pipeline_run_id) or {}
+                    st_ex_mt = str(
+                        loc_exc.get("started_manifest_utc")
+                        or r_ent.get("started_at")
+                        or datetime.now(UTC).isoformat()
+                    )
+                    exc_manifest = build_ceap_dispatcher_run_metadata(
+                        pipeline_run_id=pipeline_run_id,
+                        mode=mode,
+                        status=raw_stat_exc,
+                        started_at_utc=st_ex_mt,
+                        finished_at_utc=None,
+                        failed_at_utc=fail_wall,
+                        total_tasks_expected=max(
+                            int(r_ent.get("total_tasks_expected", 0) or 0),
+                            tq_exc,
+                        ),
+                        total_tasks_queued=tq_exc,
+                        total_tasks_pending=int(
+                            r_ent.get("total_tasks_pending", 0) or 0
+                        ),
+                        target_year=target_year,
+                        months_to_process_json=mj_ex,
+                        enqueue_phase_complete=False,
+                        deputies_snapshot_date=str(
+                            loc_exc.get("snapshot_in_use_date") or ""
+                        ),
+                        deputies_snapshot_path=str(
+                            loc_exc.get("snapshot_in_use_path") or ""
+                        ),
+                        deputies_snapshot_record_count=int(
+                            loc_exc.get("snapshot_in_use_record_count") or 0
+                        ),
+                        deputies_snapshot_status=str(
+                            loc_exc.get("snapshot_status_value") or ""
+                        ),
+                        error_type=exc_t,
+                        error_message=exc_msg,
+                        total_tasks_success=int(
+                            r_ent.get("total_tasks_success", 0) or 0
+                        ),
+                        total_tasks_failed=int(
+                            r_ent.get("total_tasks_failed", 0) or 0
+                        ),
+                        total_tasks_poison=int(
+                            r_ent.get("total_tasks_poison", 0) or 0
+                        ),
+                        total_tasks_running=int(
+                            r_ent.get("total_tasks_running", 0) or 0
+                        ),
+                    )
+                    mp_ex, _ = persist_ceap_dispatcher_run_metadata(
+                        rw_ex,
+                        exc_manifest,
+                        write_success_marker_now=False,
+                    )
+                    log_structured(
+                        logger,
+                        "warning",
+                        "CEAP run manifest updated as failed in raw.",
+                        pipeline_run_id=pipeline_run_id,
+                        manifest_path=mp_ex,
+                        mode=mode,
+                        manifest_status=raw_stat_exc,
+                        manifest_stage="unhandled_exception",
+                        error_type=exc_t,
+                        error_message=exc_msg,
+                    )
+            except Exception as raw_exc_err:
+                log_structured(
+                    logger,
+                    "warning",
+                    "Failed to persist CEAP run manifest in raw.",
+                    pipeline_run_id=pipeline_run_id,
+                    manifest_path=ceap_run_metadata_path(pipeline_run_id),
+                    mode=mode,
+                    manifest_stage="unhandled_exception",
+                    error=str(raw_exc_err),
+                    error_type=type(raw_exc_err).__name__,
+                )
             log_structured(
                 logger,
                 "info",
