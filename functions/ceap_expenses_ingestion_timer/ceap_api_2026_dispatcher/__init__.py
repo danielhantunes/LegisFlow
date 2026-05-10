@@ -41,6 +41,7 @@ from shared.raw_audit import enrich_deputies_page_payload, now_utc_iso
 from shared.ceap_raw_manifest import (
     build_ceap_dispatcher_run_metadata,
     ceap_run_metadata_path,
+    ceap_run_success_path,
     persist_ceap_dispatcher_run_metadata,
 )
 from shared.work_message import CeapApiWorkMessage
@@ -80,6 +81,182 @@ def _parse_iso_utc(raw: Any) -> datetime | None:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
+
+
+def _reconcile_run_manifest_from_table(
+    *,
+    parts: CeapPartitionStateStore,
+    registry: CeapRunRegistry,
+    raw_writer: AdlsRawWriter,
+    pipeline_run_id: str,
+    mode: str,
+    target_year: int,
+    months_to_process_json: str,
+) -> tuple[bool, dict[str, Any]]:
+    """Brings the Raw ``metadata.json`` (and registry status) in sync with IngestionState.
+
+    Always overwrites ``metadata.json`` with counters derived from
+    ``count_statuses_by_run`` (`current_pipeline_run_id` OR
+    `last_pipeline_run_id`). If every partition is ``SUCCESS`` and the enqueue
+    phase is complete:
+
+    * the run is upserted as ``COMPLETED`` in ``IngestionControlApi2026`` (with
+      ``completed_at``, cleared ``failed_at``/``last_error``);
+    * the ``_SUCCESS`` marker is written under the run's manifest folder.
+
+    Returns ``(strict_completed, run_after_reconcile)``.
+    """
+    pc = parts.count_statuses_by_run(pipeline_run_id)
+    run = registry.get_run(pipeline_run_id) or {}
+    enq_done = bool(run.get("enqueue_phase_complete"))
+
+    te = (
+        pc["queued"]
+        + pc["running"]
+        + pc["success"]
+        + pc["failed"]
+        + pc["poison"]
+        + pc["pending"]
+        + pc["stale"]
+        + pc["other"]
+        if enq_done
+        else int(run.get("total_tasks_expected", 0) or 0)
+    )
+
+    strict_completed = (
+        enq_done
+        and te > 0
+        and pc["success"] == te
+        and pc["failed"] == 0
+        and pc["pending"] == 0
+        and pc["poison"] == 0
+        and pc["running"] == 0
+        and pc["queued"] == 0
+        and pc["stale"] == 0
+        and pc["other"] == 0
+    )
+
+    completed_iso = str(run.get("completed_at") or "").strip()
+    if strict_completed and not completed_iso:
+        completed_iso = datetime.now(UTC).isoformat()
+
+    if strict_completed and str(run.get("status", "")).upper() != "COMPLETED":
+        prev_failed_at = str(run.get("failed_at", "") or "")
+        prev_last_error = str(run.get("last_error", "") or "")
+        prev_status = str(run.get("status", "")).upper()
+        recover_patch: dict[str, Any] = {
+            "pipeline_run_id": pipeline_run_id,
+            "status": "COMPLETED",
+            "completed_at": completed_iso,
+            "failed_at": "",
+            "last_error": "",
+            "total_tasks_expected": te,
+            "total_tasks_success": pc["success"],
+            "total_tasks_failed": 0,
+            "total_tasks_pending": 0,
+            "total_tasks_poison": 0,
+            "total_tasks_running": 0,
+            "total_tasks_queued": 0,
+        }
+        if prev_failed_at or prev_last_error or prev_status in {"FAILED", "PARTIAL"}:
+            recover_patch["last_recovered_at"] = datetime.now(UTC).isoformat()
+        try:
+            registry.upsert_run(recover_patch)
+            run = registry.get_run(pipeline_run_id) or run
+        except Exception as recover_err:
+            log_structured(
+                logger,
+                "warning",
+                "Could not upsert COMPLETED run state during pre-flight reconcile.",
+                pipeline_run_id=pipeline_run_id,
+                error=str(recover_err),
+                error_type=type(recover_err).__name__,
+            )
+
+    status_final = (
+        "COMPLETED"
+        if strict_completed
+        else (str(run.get("status") or "").upper() or "UNKNOWN")
+    )
+    months_json = (
+        str(run.get("months_to_process"))
+        if run.get("months_to_process")
+        else months_to_process_json
+    )
+    started_at = str(
+        run.get("started_at")
+        or completed_iso
+        or datetime.now(UTC).isoformat()
+    )
+    failed_at = None
+    if status_final in ("FAILED", "PARTIAL", "PARTIALLY_COMPLETED"):
+        fa = str(run.get("failed_at") or "").strip()
+        failed_at = fa if fa else None
+
+    err_type = None if status_final == "COMPLETED" else run.get("error_type")
+    err_msg = None if status_final == "COMPLETED" else run.get("last_error")
+
+    doc = build_ceap_dispatcher_run_metadata(
+        pipeline_run_id=pipeline_run_id,
+        mode=mode,
+        status=status_final,
+        started_at_utc=started_at,
+        finished_at_utc=completed_iso if status_final == "COMPLETED" else None,
+        failed_at_utc=failed_at,
+        total_tasks_expected=te,
+        total_tasks_queued=pc["queued"],
+        total_tasks_pending=pc["pending"],
+        target_year=target_year,
+        months_to_process_json=months_json,
+        enqueue_phase_complete=enq_done,
+        deputies_snapshot_date=str(run.get("deputies_snapshot_date") or ""),
+        deputies_snapshot_path=str(run.get("deputies_snapshot_path") or ""),
+        deputies_snapshot_record_count=int(
+            run.get("deputies_snapshot_record_count", 0) or 0
+        ),
+        deputies_snapshot_status=str(run.get("deputies_snapshot_status") or ""),
+        error_type=str(err_type) if err_type else None,
+        error_message=str(err_msg) if err_msg else None,
+        total_tasks_success=pc["success"],
+        total_tasks_failed=pc["failed"],
+        total_tasks_poison=pc["poison"],
+        total_tasks_running=pc["running"],
+    )
+    try:
+        manifest_path, _ = persist_ceap_dispatcher_run_metadata(
+            raw_writer,
+            doc,
+            write_success_marker_now=strict_completed,
+        )
+        log_structured(
+            logger,
+            "info",
+            "CEAP run manifest reconciled from IngestionState.",
+            pipeline_run_id=pipeline_run_id,
+            mode=mode,
+            manifest_path=manifest_path,
+            success_marker_written=strict_completed,
+            manifest_status=status_final,
+            total_tasks_expected=te,
+            total_tasks_success=pc["success"],
+            total_tasks_failed=pc["failed"],
+            total_tasks_pending=pc["pending"],
+            total_tasks_poison=pc["poison"],
+            total_tasks_running=pc["running"],
+            total_tasks_queued=pc["queued"],
+        )
+    except Exception as persist_err:
+        log_structured(
+            logger,
+            "warning",
+            "Failed to persist reconciled CEAP run manifest.",
+            pipeline_run_id=pipeline_run_id,
+            mode=mode,
+            error=str(persist_err),
+            error_type=type(persist_err).__name__,
+        )
+
+    return strict_completed, run
 
 
 def _partition_enqueue_action(
@@ -192,6 +369,39 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     parts = CeapPartitionStateStore.from_connection_string(conn, state_table)
 
     run = registry.get_run(pipeline_run_id)
+
+    # Pre-flight manifest reconcile: every tick that finds an existing run
+    # rewrites Raw metadata.json from IngestionState ground truth and (when
+    # strictly complete) creates _SUCCESS even if the dispatcher will skip
+    # the rest of the tick. Skipped only when _SUCCESS already exists, since
+    # the manifest then matches the contract by definition.
+    if run:
+        try:
+            raw_writer_pre = AdlsRawWriter(
+                account_name=os.environ["RAW_STORAGE_ACCOUNT_NAME"]
+            )
+            if not raw_writer_pre.path_exists(ceap_run_success_path(pipeline_run_id)):
+                _reconcile_run_manifest_from_table(
+                    parts=parts,
+                    registry=registry,
+                    raw_writer=raw_writer_pre,
+                    pipeline_run_id=pipeline_run_id,
+                    mode=mode,
+                    target_year=target_year,
+                    months_to_process_json=json.dumps(month_list),
+                )
+                run = registry.get_run(pipeline_run_id) or run
+        except Exception as recon_err:
+            log_structured(
+                logger,
+                "warning",
+                "Pre-flight CEAP manifest reconcile failed.",
+                pipeline_run_id=pipeline_run_id,
+                mode=mode,
+                error=str(recon_err),
+                error_type=type(recon_err).__name__,
+            )
+
     if run and str(run.get("status", "")).upper() == "COMPLETED":
         log_structured(
             logger,
