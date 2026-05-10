@@ -5,6 +5,7 @@
     "CEAP_QUEUE_STORAGE": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "RAW_STORAGE_ACCOUNT_NAME": "<adls-account-name>",
+    "LAKEHOUSE_FILESYSTEM_NAME": "lakehouse",
     "INGESTION_STATE_TABLE": "IngestionState",
     "INGESTION_CONTROL_TABLE": "IngestionControlApi2026",
     "CEAP_API_QUEUE_NAME": "ceap-api-2026-work",
@@ -18,6 +19,7 @@
     "CEAP_REFERENCE_TIMEZONE": "America/Sao_Paulo",
     "CEAP_LEGACY_MONOLITH_ENABLED": "false",
     "AzureWebJobs.ceap_expenses_ingestion_timer.Disabled": "true",
-    "MAX_RETRY_ATTEMPTS": "3"
+    "MAX_RETRY_ATTEMPTS": "3",
+    "ENABLE_CEAP_RESET_FUNCTION": "false"
   }
 }
