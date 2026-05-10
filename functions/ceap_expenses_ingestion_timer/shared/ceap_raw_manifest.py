@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from .adls_writer import AdlsRawWriter
 from .metadata import (
     PROFILE_FANOUT_RUN,
     build_run_metadata,
@@ -13,6 +12,9 @@ from .metadata import (
     write_run_metadata,
     write_success_marker,
 )
+
+if TYPE_CHECKING:
+    from .adls_writer import AdlsRawWriter
 
 CEAP_DESPESAS_PREFIX = "raw/camara/ceap/api/despesas"
 

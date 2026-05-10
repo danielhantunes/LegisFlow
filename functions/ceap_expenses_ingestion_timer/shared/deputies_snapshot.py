@@ -3,9 +3,25 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
-from .adls_writer import AdlsRawWriter
+from .metadata import (
+    RunStatus,
+    build_run_metadata,
+    persist_run_manifest,
+    write_run_metadata,
+)
+from .raw_audit import (
+    CEAP_API_BASE_URL,
+    CEAP_SOURCE_SYSTEM,
+    DEPUTIES_API_PATH,
+    DEPUTIES_DOMAIN,
+    DEPUTIES_ENTITY,
+    now_utc_iso,
+)
+
+if TYPE_CHECKING:
+    from .adls_writer import AdlsRawWriter
 
 DEPUTIES_LIST_PREFIX = "raw/camara/deputados/api/list"
 
@@ -42,6 +58,113 @@ def write_deputies_manifest(
 
 def write_deputies_success_marker(adls: AdlsRawWriter, reference_date: str) -> str:
     return adls.write_text(deputies_success_path(reference_date), "")
+
+
+def build_deputies_snapshot_metadata(
+    *,
+    pipeline_run_id: str,
+    execution_id: str,
+    reference_date: str,
+    reference_timezone: str,
+    status: str,
+    started_at_utc: str,
+    completed_at_utc: str | None = None,
+    total_pages: int = 0,
+    record_count: int = 0,
+    error_message: str | None = None,
+    api_base_url: str = CEAP_API_BASE_URL,
+    api_path: str = DEPUTIES_API_PATH,
+) -> dict[str, Any]:
+    """Builds the Raw ``metadata.json`` payload for /deputados snapshots (v1.0).
+
+    The status flows through ``STARTED`` -> ``RUNNING`` -> ``COMPLETED`` (or
+    ``FAILED`` / ``PARTIALLY_COMPLETED``). The ``_SUCCESS`` marker must only
+    be written when ``status == 'COMPLETED'`` (handled by
+    :func:`persist_deputies_snapshot_metadata`).
+    """
+    st_upper = str(status).upper()
+    normalized = cast(
+        RunStatus,
+        st_upper
+        if st_upper
+        in {
+            "STARTED",
+            "RUNNING",
+            "COMPLETED",
+            "PARTIAL",
+            "FAILED",
+            "PARTIALLY_COMPLETED",
+        }
+        else "RUNNING",
+    )
+    raw_path = deputies_date_dir(reference_date)
+    success_path = deputies_success_path(reference_date)
+    ingested = now_utc_iso()
+    meta = build_run_metadata(
+        source=CEAP_SOURCE_SYSTEM,
+        domain=DEPUTIES_DOMAIN,
+        entity=DEPUTIES_ENTITY,
+        endpoint=DEPUTIES_ENTITY,
+        api_base_url=api_base_url,
+        api_path=api_path,
+        pipeline_run_id=pipeline_run_id,
+        execution_id=execution_id,
+        run_type="snapshot",
+        status=normalized,
+        started_at=started_at_utc,
+        completed_at=completed_at_utc,
+        raw_path=raw_path,
+        success_marker_path=success_path,
+        total_pages=total_pages,
+        files_written=total_pages,
+        record_count=record_count,
+        error_message=error_message,
+        partitioning={
+            "reference_date": reference_date,
+            "reference_timezone": reference_timezone,
+        },
+        snapshot={
+            "snapshot_type": "dimension",
+            "snapshot_date": reference_date,
+            "snapshot_status": normalized,
+            "snapshot_record_count": int(record_count or 0),
+        },
+    )
+    meta["_pipeline_run_id"] = pipeline_run_id
+    meta["_execution_id"] = execution_id
+    meta["_source_system"] = CEAP_SOURCE_SYSTEM
+    meta["_source_endpoint"] = DEPUTIES_ENTITY
+    meta["_reference_date"] = reference_date
+    meta["_ingested_at_utc"] = ingested
+    meta["_loaded_at"] = ingested
+    return meta
+
+
+def persist_deputies_snapshot_metadata(
+    adls: AdlsRawWriter,
+    reference_date: str,
+    metadata: dict[str, Any],
+    *,
+    write_success_marker_now: bool,
+) -> tuple[str, bool]:
+    """Writes ``metadata.json`` and (only when allowed) the ``_SUCCESS`` marker.
+
+    Mirrors :func:`shared.metadata.persist_run_manifest` semantics but uses
+    the deputies-specific Raw paths. Always overwrites ``metadata.json``;
+    only writes ``_SUCCESS`` when both ``write_success_marker_now`` is True
+    and ``metadata.status == 'COMPLETED'``.
+    """
+    metadata_path = deputies_metadata_path(reference_date)
+    success_path = deputies_success_path(reference_date)
+    if write_success_marker_now and str(metadata.get("status", "")).upper() == "COMPLETED":
+        return persist_run_manifest(
+            adls,
+            metadata_path=metadata_path,
+            success_path=success_path,
+            metadata=metadata,
+        )
+    write_run_metadata(adls, metadata_path, metadata)
+    return metadata_path, False
 
 
 def read_deputies_manifest(adls: AdlsRawWriter, reference_date: str) -> dict[str, Any] | None:

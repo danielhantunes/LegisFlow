@@ -16,6 +16,7 @@ from shared.ceap_partition_state import CeapPartitionStateStore
 from shared.ceap_run_registry import CeapRunRegistry, pipeline_run_updates_registry
 from shared.dispatch_months import max_dispatch_month
 from shared.logger import get_logger, log_structured
+from shared.raw_audit import enrich_ceap_page_payload, now_utc_iso
 from shared.work_message import CeapApiWorkMessage
 
 logger = get_logger()
@@ -240,7 +241,18 @@ def main(msg: func.QueueMessage) -> None:
                 f"pipeline_run_id={pr_seg}/execution_id={exec_seg}/"
                 f"deputado_id={wm.id_deputado}/page_{page}.json"
             )
-            written = raw_writer.write_json(raw_path, payload)
+            enriched_payload = enrich_ceap_page_payload(
+                payload,
+                pipeline_run_id=pipeline_run_id,
+                execution_id=execution_id,
+                id_deputado=wm.id_deputado,
+                ano=wm.ano,
+                mes=wm.mes,
+                page=page,
+                raw_path=raw_path,
+                ingested_at_utc=now_utc_iso(),
+            )
+            written = raw_writer.write_json(raw_path, enriched_payload)
             last_written = written
             batch = payload.get("dados", []) or []
             rc = len(batch)

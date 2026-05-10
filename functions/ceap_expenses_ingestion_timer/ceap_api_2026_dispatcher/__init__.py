@@ -17,15 +17,15 @@ from shared.api_client import CamaraApiClient
 from shared.ceap_partition_state import CeapPartitionStateStore
 from shared.ceap_run_registry import CeapRunRegistry
 from shared.deputies_snapshot import (
+    build_deputies_snapshot_metadata,
     deputies_date_dir,
+    deputies_success_path,
     find_latest_valid_snapshot,
     is_snapshot_manifest_valid,
-    read_deputies_manifest,
-    deputies_success_path,
     load_deputies_from_snapshot,
+    persist_deputies_snapshot_metadata,
+    read_deputies_manifest,
     write_deputies_manifest,
-    write_deputies_metadata,
-    write_deputies_success_marker,
 )
 from shared.dispatch_months import (
     max_dispatch_month,
@@ -37,6 +37,7 @@ from shared.queue_helpers import (
     prepare_queue_client_for_dispatch,
     send_json_message_with_client,
 )
+from shared.raw_audit import enrich_deputies_page_payload, now_utc_iso
 from shared.ceap_raw_manifest import (
     build_ceap_dispatcher_run_metadata,
     ceap_run_metadata_path,
@@ -478,6 +479,44 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 snapshot_execution_id=snapshot_execution_id,
             )
 
+            try:
+                running_meta = build_deputies_snapshot_metadata(
+                    pipeline_run_id=pipeline_run_id,
+                    execution_id=snapshot_execution_id,
+                    reference_date=reference_date_str,
+                    reference_timezone=reference_tz_name,
+                    status="RUNNING",
+                    started_at_utc=snapshot_started_at,
+                    completed_at_utc=None,
+                    total_pages=0,
+                    record_count=0,
+                    error_message=None,
+                )
+                persist_deputies_snapshot_metadata(
+                    raw_writer,
+                    reference_date_str,
+                    running_meta,
+                    write_success_marker_now=False,
+                )
+                log_structured(
+                    logger,
+                    "info",
+                    "Deputies snapshot metadata persisted (RUNNING).",
+                    pipeline_run_id=pipeline_run_id,
+                    reference_date=reference_date_str,
+                    snapshot_execution_id=snapshot_execution_id,
+                )
+            except Exception as init_meta_err:
+                log_structured(
+                    logger,
+                    "warning",
+                    "Failed to persist initial deputies snapshot metadata.",
+                    pipeline_run_id=pipeline_run_id,
+                    reference_date=reference_date_str,
+                    error=str(init_meta_err),
+                    error_type=type(init_meta_err).__name__,
+                )
+
             collected: list[dict[str, Any]] = []
             pagina_api = 1
             pages_written = 0
@@ -504,7 +543,16 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                         f"execution_id={snapshot_execution_id}/"
                         f"page_{pagina_api}.json"
                     )
-                    raw_writer.write_json(raw_path, payload)
+                    enriched_dep_payload = enrich_deputies_page_payload(
+                        payload,
+                        pipeline_run_id=pipeline_run_id,
+                        execution_id=snapshot_execution_id,
+                        reference_date=reference_date_str,
+                        page=pagina_api,
+                        raw_path=raw_path,
+                        ingested_at_utc=now_utc_iso(),
+                    )
+                    raw_writer.write_json(raw_path, enriched_dep_payload)
                     pages_written += 1
                     collected.extend([d for d in dados if isinstance(d, dict) and "id" in d])
                     log_structured(
@@ -529,21 +577,12 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 total_dep_pages = pages_written
                 total_dep_records = len(collected)
                 snapshot_status_value = "COMPLETED" if total_dep_records > 0 else "FAILED"
+                snapshot_error_message = (
+                    None
+                    if snapshot_status_value == "COMPLETED"
+                    else "Empty deputies response"
+                )
 
-                metadata_payload = {
-                    "endpoint": "deputados",
-                    "reference_date": reference_date_str,
-                    "reference_timezone": reference_tz_name,
-                    "pipeline_run_id": pipeline_run_id,
-                    "execution_id": snapshot_execution_id,
-                    "status": snapshot_status_value,
-                    "total_pages": total_dep_pages,
-                    "record_count": total_dep_records,
-                    "started_at": snapshot_started_at,
-                    "completed_at": snapshot_completed_at,
-                    "files_written": total_dep_pages,
-                    "error_message": "" if snapshot_status_value == "COMPLETED" else "Empty deputies response",
-                }
                 manifest_payload = {
                     "endpoint": "deputados",
                     "reference_date": reference_date_str,
@@ -560,7 +599,24 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     "execution_id": snapshot_execution_id,
                 }
                 try:
-                    write_deputies_metadata(raw_writer, reference_date_str, metadata_payload)
+                    final_meta = build_deputies_snapshot_metadata(
+                        pipeline_run_id=pipeline_run_id,
+                        execution_id=snapshot_execution_id,
+                        reference_date=reference_date_str,
+                        reference_timezone=reference_tz_name,
+                        status=snapshot_status_value,
+                        started_at_utc=snapshot_started_at,
+                        completed_at_utc=snapshot_completed_at,
+                        total_pages=total_dep_pages,
+                        record_count=total_dep_records,
+                        error_message=snapshot_error_message,
+                    )
+                    persist_deputies_snapshot_metadata(
+                        raw_writer,
+                        reference_date_str,
+                        final_meta,
+                        write_success_marker_now=(snapshot_status_value == "COMPLETED"),
+                    )
                 except Exception as meta_err:
                     log_structured(
                         logger,
@@ -583,20 +639,6 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                         error=str(manifest_err),
                         error_type=type(manifest_err).__name__,
                     )
-
-                if snapshot_status_value == "COMPLETED":
-                    try:
-                        write_deputies_success_marker(raw_writer, reference_date_str)
-                    except Exception as success_err:
-                        log_structured(
-                            logger,
-                            "warning",
-                            "Failed to write deputies _SUCCESS marker.",
-                            pipeline_run_id=pipeline_run_id,
-                            reference_date=reference_date_str,
-                            error=str(success_err),
-                            error_type=type(success_err).__name__,
-                        )
 
                 try:
                     registry.upsert_snapshot(
@@ -660,6 +702,38 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     )
                 except Exception:
                     pass
+                try:
+                    failed_status = (
+                        "PARTIALLY_COMPLETED" if pages_written > 0 else "FAILED"
+                    )
+                    failed_meta = build_deputies_snapshot_metadata(
+                        pipeline_run_id=pipeline_run_id,
+                        execution_id=snapshot_execution_id,
+                        reference_date=reference_date_str,
+                        reference_timezone=reference_tz_name,
+                        status=failed_status,
+                        started_at_utc=snapshot_started_at,
+                        completed_at_utc=None,
+                        total_pages=pages_written,
+                        record_count=len(collected),
+                        error_message=f"{type(collect_err).__name__}: {str(collect_err)}",
+                    )
+                    persist_deputies_snapshot_metadata(
+                        raw_writer,
+                        reference_date_str,
+                        failed_meta,
+                        write_success_marker_now=False,
+                    )
+                except Exception as failed_meta_err:
+                    log_structured(
+                        logger,
+                        "warning",
+                        "Failed to persist FAILED deputies snapshot metadata.",
+                        pipeline_run_id=pipeline_run_id,
+                        reference_date=reference_date_str,
+                        error=str(failed_meta_err),
+                        error_type=type(failed_meta_err).__name__,
+                    )
                 raise
 
         if not deputies:

@@ -19,9 +19,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
-from .adls_writer import AdlsRawWriter
+if TYPE_CHECKING:
+    from .adls_writer import AdlsRawWriter
 
 METADATA_VERSION = "1.0"
 
