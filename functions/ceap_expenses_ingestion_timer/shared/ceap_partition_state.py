@@ -47,7 +47,12 @@ class CeapPartitionStateStore:
         self.table_client.upsert_entity(entity=entity, mode="merge")
 
     def count_statuses_by_run(self, pipeline_run_id: str) -> dict[str, int]:
-        """Counts of IngestionState partitions for the given pipeline_run_id, grouped by status.
+        """Counts of IngestionState partitions tied to the run, grouped by status.
+
+        A partition is included if ``current_pipeline_run_id`` **or**
+        ``last_pipeline_run_id`` matches ``pipeline_run_id``. This matches workers
+        that finish with SUCCESS while the row still reflects the run that last
+        dispatched work (and avoids under-counting SUCCESS after cursor/requeue flows).
 
         Returns keys: queued, running, success, failed, poison, pending, stale, other.
         """
@@ -66,7 +71,8 @@ class CeapPartitionStateStore:
         safe_run = pipeline_run_id.replace("'", "''")
         flt = (
             f"PartitionKey eq '{self.PARTITION_KEY}' "
-            f"and current_pipeline_run_id eq '{safe_run}'"
+            f"and (current_pipeline_run_id eq '{safe_run}' "
+            f"or last_pipeline_run_id eq '{safe_run}')"
         )
         for ent in self.table_client.list_entities(filter=flt):
             st = str(ent.get("status", "")).upper()

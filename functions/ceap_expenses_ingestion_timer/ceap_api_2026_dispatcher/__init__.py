@@ -1266,7 +1266,8 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 "idle_enqueue_ticks": idle_ticks,
                 "enqueue_phase_complete": enqueue_complete,
                 "total_tasks_expected": total_tasks_expected,
-                "total_tasks_queued": total_queued,
+                # Persist current QUEUED partition count from Table, not cumulative enqueue depth.
+                "total_tasks_queued": total_tasks_queued_state,
                 "total_tasks_success": total_tasks_success,
                 "total_tasks_failed": total_tasks_failed,
                 "total_tasks_running": total_tasks_running,
@@ -1378,20 +1379,48 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         final_status = str(run_done.get("status", ""))
         total_deputados = _deputados_total_hint(hint_payload)
 
-        # Write Raw run manifest for downstream Bronze orchestration (metadata.json).
-        strict_completed = (
-            bool(run_done.get("enqueue_phase_complete"))
-            and int(run_done.get("total_tasks_expected", 0) or 0)
-            == int(run_done.get("total_tasks_success", 0) or 0)
-            and int(run_done.get("total_tasks_failed", 0) or 0) == 0
-            and int(run_done.get("total_tasks_pending", 0) or 0) == 0
-            and int(run_done.get("total_tasks_poison", 0) or 0) == 0
-            and int(run_done.get("total_tasks_running", 0) or 0) == 0
+        # ---------------------------------------------------------------------
+        # Raw manifest: always derive task counters from IngestionState ground
+        # truth (current OR last pipeline_run_id). Registry rows can lag one tick
+        # behind workers; a second Table scan here keeps metadata.json aligned.
+        # ---------------------------------------------------------------------
+        pc_manifest = parts.count_statuses_by_run(pipeline_run_id)
+        eq_done_m = bool(run_done.get("enqueue_phase_complete"))
+        te_manifest = (
+            pc_manifest["queued"]
+            + pc_manifest["running"]
+            + pc_manifest["success"]
+            + pc_manifest["failed"]
+            + pc_manifest["poison"]
+            + pc_manifest["pending"]
+            + pc_manifest["stale"]
+            + pc_manifest["other"]
+            if eq_done_m
+            else int(run_done.get("total_tasks_expected", 0) or 0)
         )
-        manifest_status_final = str(final_status or "").upper() or "UNKNOWN"
+
+        strict_completed = (
+            eq_done_m
+            and te_manifest > 0
+            and pc_manifest["success"] == te_manifest
+            and pc_manifest["failed"] == 0
+            and pc_manifest["pending"] == 0
+            and pc_manifest["poison"] == 0
+            and pc_manifest["running"] == 0
+            and pc_manifest["queued"] == 0
+            and pc_manifest["stale"] == 0
+            and pc_manifest["other"] == 0
+        )
+        manifest_status_final = (
+            "COMPLETED"
+            if strict_completed
+            else (str(final_status or "").upper() or "UNKNOWN")
+        )
         fin_iso = str(
             completed_at_iso or run_done.get("completed_at") or ""
         ).strip()
+        if strict_completed and not fin_iso:
+            fin_iso = datetime.now(UTC).isoformat()
         fai_iso = str(run_done.get("failed_at", "") or "").strip()
         finished_at_utc_final = (
             fin_iso
@@ -1401,6 +1430,40 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         failed_at_utc_final = None
         if manifest_status_final in ("FAILED", "PARTIAL", "PARTIALLY_COMPLETED"):
             failed_at_utc_final = fai_iso if fai_iso else None
+
+        # Align _runs with Table truth when workers finished but status was stuck (e.g. QUEUED).
+        if strict_completed and str(run_done.get("status", "")).upper() != "COMPLETED":
+            prev_failed_at = str(run_done.get("failed_at", "") or "")
+            prev_last_error = str(run_done.get("last_error", "") or "")
+            prev_status = str(run_done.get("status", "")).upper()
+            recover_patch: dict[str, Any] = {
+                "pipeline_run_id": pipeline_run_id,
+                "status": "COMPLETED",
+                "completed_at": fin_iso,
+                "failed_at": "",
+                "last_error": "",
+                "total_tasks_expected": te_manifest,
+                "total_tasks_success": pc_manifest["success"],
+                "total_tasks_failed": 0,
+                "total_tasks_pending": 0,
+                "total_tasks_poison": 0,
+                "total_tasks_running": 0,
+                "total_tasks_queued": pc_manifest["queued"],
+            }
+            if prev_failed_at or prev_last_error or prev_status in {"FAILED", "PARTIAL"}:
+                recover_patch["last_recovered_at"] = datetime.now(UTC).isoformat()
+            try:
+                registry.upsert_run(recover_patch)
+                run_done = registry.get_run(pipeline_run_id) or run_done
+            except Exception as recover_err:
+                log_structured(
+                    logger,
+                    "warning",
+                    "Could not upsert COMPLETED run state after Table-grounded manifest check.",
+                    pipeline_run_id=pipeline_run_id,
+                    error=str(recover_err),
+                    error_type=type(recover_err).__name__,
+                )
 
         months_table_json = (
             str(run_done.get("months_to_process"))
@@ -1427,13 +1490,9 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 ),
                 finished_at_utc=finished_at_utc_final,
                 failed_at_utc=failed_at_utc_final,
-                total_tasks_expected=int(
-                    run_done.get("total_tasks_expected", 0) or 0
-                ),
-                total_tasks_queued=int(run_done.get("total_tasks_queued", 0) or 0),
-                total_tasks_pending=int(
-                    run_done.get("total_tasks_pending", 0) or 0
-                ),
+                total_tasks_expected=int(te_manifest),
+                total_tasks_queued=int(pc_manifest["queued"]),
+                total_tasks_pending=int(pc_manifest["pending"]),
                 target_year=target_year,
                 months_to_process_json=months_table_json,
                 enqueue_phase_complete=bool(
@@ -1461,18 +1520,10 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 ),
                 error_type=str(err_type_final) if err_type_final else None,
                 error_message=str(err_msg_final) if err_msg_final else None,
-                total_tasks_success=int(
-                    run_done.get("total_tasks_success", 0) or 0
-                ),
-                total_tasks_failed=int(
-                    run_done.get("total_tasks_failed", 0) or 0
-                ),
-                total_tasks_poison=int(
-                    run_done.get("total_tasks_poison", 0) or 0
-                ),
-                total_tasks_running=int(
-                    run_done.get("total_tasks_running", 0) or 0
-                ),
+                total_tasks_success=int(pc_manifest["success"]),
+                total_tasks_failed=int(pc_manifest["failed"]),
+                total_tasks_poison=int(pc_manifest["poison"]),
+                total_tasks_running=int(pc_manifest["running"]),
             )
             mp_fin, _sp_fin = persist_ceap_dispatcher_run_metadata(
                 raw_writer,
