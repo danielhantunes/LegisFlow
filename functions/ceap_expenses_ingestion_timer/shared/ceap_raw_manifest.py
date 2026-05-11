@@ -55,17 +55,34 @@ def build_ceap_dispatcher_run_metadata(
     deputies_snapshot_path: str = "",
     deputies_snapshot_record_count: int = 0,
     deputies_snapshot_status: str = "",
+    deputies_snapshot_pipeline_run_id: str = "",
     error_type: str | None = None,
     error_message: str | None = None,
     total_tasks_success: int = 0,
     total_tasks_failed: int = 0,
     total_tasks_poison: int = 0,
     total_tasks_running: int = 0,
+    max_tasks_per_dispatch: int | None = None,
+    total_raw_files_written: int | None = None,
+    total_records_collected: int | None = None,
 ) -> dict[str, Any]:
     """Payload for ``metadata.json`` under ``_metadata/runs`` (dispatcher-owned).
 
     Includes v1.0 base fields via :func:`build_run_metadata` plus explicit
     ``*_utc`` timestamps for operations / App Insights correlation.
+
+    Notes on the CEAP-specific shape:
+
+    * ``months_to_process`` is always serialised as a JSON array (e.g. ``[5, 4]``).
+    * The four ambiguous-zero base fields (``total_pages``, ``items_per_page``,
+      ``files_written``, ``record_count``) — used by snapshot-style manifests —
+      are stripped, since CEAP is fanout-driven and counts live in
+      ``total_tasks_*`` instead.
+    * Optional aggregates (``total_raw_files_written``, ``total_records_collected``)
+      and ``max_tasks_per_dispatch`` are surfaced when provided by the caller.
+    * ``deputies_snapshot_pipeline_run_id`` is the pipeline_run_id of the
+      deputies snapshot used as parent (may differ from the CEAP run when the
+      snapshot is reused from a previous reference_date).
     """
     st_upper = str(status).upper()
     normalized = cast(
@@ -84,18 +101,34 @@ def build_ceap_dispatcher_run_metadata(
     )
     succ_path = ceap_run_success_path(pipeline_run_id)
     try:
-        month_ints = json.loads(months_to_process_json)
+        parsed_months = json.loads(months_to_process_json)
     except (json.JSONDecodeError, TypeError):
-        month_ints = []
-    extras: dict[str, Any] = {"months_to_process": months_to_process_json}
-    if isinstance(month_ints, list):
-        extras["reference_months"] = month_ints
-
-    fanout_kw: dict[str, Any] | None = (
-        {"parent_entity": "deputados_list", "parent_snapshot_path": deputies_snapshot_path}
-        if deputies_snapshot_path
-        else None
+        parsed_months = []
+    month_ints: list[int] = (
+        [int(m) for m in parsed_months if isinstance(m, (int, str)) and str(m).strip().lstrip("-").isdigit()]
+        if isinstance(parsed_months, list)
+        else []
     )
+
+    extras: dict[str, Any] = {
+        "months_to_process": month_ints,
+        "reference_months": month_ints,
+    }
+    if max_tasks_per_dispatch is not None:
+        extras["max_tasks_per_dispatch"] = int(max_tasks_per_dispatch)
+    if total_raw_files_written is not None:
+        extras["total_raw_files_written"] = int(total_raw_files_written)
+    if total_records_collected is not None:
+        extras["total_records_collected"] = int(total_records_collected)
+
+    fanout_kw: dict[str, Any] | None = None
+    if deputies_snapshot_path or deputies_snapshot_pipeline_run_id:
+        fanout_kw = {
+            "parent_entity": "deputados_list",
+            "parent_snapshot_path": deputies_snapshot_path,
+        }
+        if deputies_snapshot_pipeline_run_id:
+            fanout_kw["parent_pipeline_run_id"] = deputies_snapshot_pipeline_run_id
 
     meta = build_run_metadata(
         source="camara",
@@ -126,6 +159,13 @@ def build_ceap_dispatcher_run_metadata(
         fanout=fanout_kw,
         extras=extras,
     )
+
+    # Fanout/run manifests don't carry per-page snapshot counters. Drop the four
+    # ambiguous-zero fields v1.0's base layer always emits so the metadata.json
+    # only reflects fields that actually apply to CEAP runs.
+    for k in ("total_pages", "items_per_page", "files_written", "record_count"):
+        meta.pop(k, None)
+
     meta["started_at_utc"] = started_at_utc
     meta["finished_at_utc"] = finished_at_utc
     meta["failed_at_utc"] = failed_at_utc
@@ -135,6 +175,7 @@ def build_ceap_dispatcher_run_metadata(
     meta["deputies_snapshot_record_count"] = int(deputies_snapshot_record_count or 0)
     meta["deputies_snapshot_status"] = deputies_snapshot_status or ""
     meta["deputies_snapshot_path"] = deputies_snapshot_path or ""
+    meta["deputies_snapshot_pipeline_run_id"] = deputies_snapshot_pipeline_run_id or ""
     if error_type:
         meta["error_type"] = error_type
     elif "error_type" in meta:

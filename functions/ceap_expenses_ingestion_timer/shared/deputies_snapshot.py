@@ -32,6 +32,19 @@ def deputies_date_dir(reference_date: str) -> str:
     return f"{DEPUTIES_LIST_PREFIX}/reference_date={reference_date}"
 
 
+def deputies_run_dir(reference_date: str, pipeline_run_id: str) -> str:
+    """Run-scoped folder for deputies snapshot pages (parent of ``execution_id`` dirs).
+
+    Pages are physically stored under
+    ``raw/camara/deputados/api/list/reference_date={ref}/pipeline_run_id={pid}/
+    execution_id={eid}/page_*.json``. Downstream consumers and the CEAP run
+    manifest's ``parent_snapshot_path`` should point to this run-level folder
+    so it remains stable even when the snapshot is re-executed under a new
+    ``execution_id``.
+    """
+    return f"{deputies_date_dir(reference_date)}/pipeline_run_id={pipeline_run_id}"
+
+
 def deputies_metadata_path(reference_date: str) -> str:
     return f"{deputies_date_dir(reference_date)}/metadata.json"
 

@@ -54,9 +54,18 @@ class CeapPartitionStateStore:
         that finish with SUCCESS while the row still reflects the run that last
         dispatched work (and avoids under-counting SUCCESS after cursor/requeue flows).
 
-        Returns keys: queued, running, success, failed, poison, pending, stale, other.
+        Returns the per-status counts plus aggregated totals derived from each
+        partition row written by the worker:
+
+        * ``queued``, ``running``, ``success``, ``failed``, ``poison``,
+          ``pending``, ``stale``, ``other`` — number of rows in each status.
+        * ``record_count_sum`` — sum of ``record_count`` across rows in
+          ``SUCCESS`` (mirrors ``len(payload["dados"])`` accumulated by the
+          worker for the partition).
+        * ``pages_written_sum`` — sum of ``last_successful_page`` across
+          ``SUCCESS`` rows (proxy for raw page files written by workers).
         """
-        counts = {
+        counts: dict[str, int] = {
             "queued": 0,
             "running": 0,
             "success": 0,
@@ -65,6 +74,8 @@ class CeapPartitionStateStore:
             "pending": 0,
             "stale": 0,
             "other": 0,
+            "record_count_sum": 0,
+            "pages_written_sum": 0,
         }
         if not pipeline_run_id:
             return counts
@@ -82,6 +93,16 @@ class CeapPartitionStateStore:
                 counts["running"] += 1
             elif st == "SUCCESS":
                 counts["success"] += 1
+                try:
+                    counts["record_count_sum"] += int(ent.get("record_count", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    counts["pages_written_sum"] += int(
+                        ent.get("last_successful_page", 0) or 0
+                    )
+                except (TypeError, ValueError):
+                    pass
             elif st == "FAILED":
                 counts["failed"] += 1
             elif st == "POISON":

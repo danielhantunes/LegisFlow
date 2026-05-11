@@ -19,6 +19,7 @@ from shared.ceap_run_registry import CeapRunRegistry
 from shared.deputies_snapshot import (
     build_deputies_snapshot_metadata,
     deputies_date_dir,
+    deputies_run_dir,
     deputies_success_path,
     find_latest_valid_snapshot,
     is_snapshot_manifest_valid,
@@ -92,6 +93,7 @@ def _reconcile_run_manifest_from_table(
     mode: str,
     target_year: int,
     months_to_process_json: str,
+    max_tasks_per_dispatch: int | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Brings the Raw ``metadata.json`` (and registry status) in sync with IngestionState.
 
@@ -122,6 +124,8 @@ def _reconcile_run_manifest_from_table(
         if enq_done
         else int(run.get("total_tasks_expected", 0) or 0)
     )
+    rec_sum = int(pc.get("record_count_sum", 0) or 0)
+    pages_sum = int(pc.get("pages_written_sum", 0) or 0)
 
     strict_completed = (
         enq_done
@@ -215,12 +219,18 @@ def _reconcile_run_manifest_from_table(
             run.get("deputies_snapshot_record_count", 0) or 0
         ),
         deputies_snapshot_status=str(run.get("deputies_snapshot_status") or ""),
+        deputies_snapshot_pipeline_run_id=str(
+            run.get("deputies_snapshot_pipeline_run_id") or ""
+        ),
         error_type=str(err_type) if err_type else None,
         error_message=str(err_msg) if err_msg else None,
         total_tasks_success=pc["success"],
         total_tasks_failed=pc["failed"],
         total_tasks_poison=pc["poison"],
         total_tasks_running=pc["running"],
+        max_tasks_per_dispatch=max_tasks_per_dispatch,
+        total_raw_files_written=pages_sum,
+        total_records_collected=rec_sum,
     )
     try:
         manifest_path, _ = persist_ceap_dispatcher_run_metadata(
@@ -389,6 +399,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     mode=mode,
                     target_year=target_year,
                     months_to_process_json=json.dumps(month_list),
+                    max_tasks_per_dispatch=max_per_tick,
                 )
                 run = registry.get_run(pipeline_run_id) or run
         except Exception as recon_err:
@@ -545,6 +556,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         total_dep_pages = 0
         total_dep_records = 0
         snapshot_execution_id = prev_snapshot_exec or dispatch_execution_id
+        snapshot_in_use_pipeline_run_id = ""
         deputies: list[dict[str, Any]] = []
 
         def _raw_manifest_valid_for_date(reference_date: str) -> tuple[bool, dict[str, Any]]:
@@ -576,7 +588,12 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             if deputies:
                 snapshot_reused = True
                 snapshot_in_use_date = reference_date_str
-                snapshot_in_use_path = snapshot_path
+                snapshot_in_use_pipeline_run_id = str(
+                    today_manifest.get("pipeline_run_id") or pipeline_run_id
+                )
+                snapshot_in_use_path = deputies_run_dir(
+                    reference_date_str, snapshot_in_use_pipeline_run_id
+                )
                 snapshot_in_use_record_count = int(today_manifest.get("record_count", 0) or 0)
                 snapshot_in_use_source = "reused_today"
                 snapshot_status_value = "COMPLETED"
@@ -627,7 +644,12 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 if deputies:
                     snapshot_reused = True
                     snapshot_in_use_date = ref_dt
-                    snapshot_in_use_path = snapshot_path
+                    snapshot_in_use_pipeline_run_id = str(
+                        latest_manifest.get("pipeline_run_id") or pipeline_run_id
+                    )
+                    snapshot_in_use_path = deputies_run_dir(
+                        ref_dt, snapshot_in_use_pipeline_run_id
+                    )
                     snapshot_in_use_record_count = int(latest_manifest.get("record_count", 0) or 0)
                     snapshot_in_use_source = "reused_fallback"
                     snapshot_status_value = "COMPLETED"
@@ -877,7 +899,10 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     )
 
                 snapshot_in_use_date = reference_date_str
-                snapshot_in_use_path = deputies_date_dir(reference_date_str)
+                snapshot_in_use_pipeline_run_id = pipeline_run_id
+                snapshot_in_use_path = deputies_run_dir(
+                    reference_date_str, pipeline_run_id
+                )
                 snapshot_in_use_record_count = total_dep_records
                 snapshot_in_use_source = "created_today" if total_dep_records > 0 else "none"
                 snapshot_created = True
@@ -974,6 +999,12 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
 
         if total_deputies > 0:
             try:
+                projected_init_expected = total_deputies * len(month_list) if month_list else 0
+                init_te = max(
+                    int(run_for_ceap_manifest.get("total_tasks_expected", 0) or 0),
+                    int(total_queued or 0),
+                    int(projected_init_expected),
+                )
                 init_ceap_meta = build_ceap_dispatcher_run_metadata(
                     pipeline_run_id=pipeline_run_id,
                     mode=mode,
@@ -981,9 +1012,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     started_at_utc=started_manifest_utc,
                     finished_at_utc=None,
                     failed_at_utc=None,
-                    total_tasks_expected=int(
-                        run_for_ceap_manifest.get("total_tasks_expected", 0) or 0
-                    ),
+                    total_tasks_expected=init_te,
                     total_tasks_queued=total_queued,
                     total_tasks_pending=0,
                     target_year=target_year,
@@ -993,6 +1022,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     deputies_snapshot_path=snapshot_in_use_path,
                     deputies_snapshot_record_count=snapshot_in_use_record_count,
                     deputies_snapshot_status=snapshot_status_value,
+                    deputies_snapshot_pipeline_run_id=snapshot_in_use_pipeline_run_id,
                     total_tasks_success=int(
                         run_for_ceap_manifest.get("total_tasks_success", 0) or 0
                     ),
@@ -1005,6 +1035,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     total_tasks_running=int(
                         run_for_ceap_manifest.get("total_tasks_running", 0) or 0
                     ),
+                    max_tasks_per_dispatch=max_per_tick,
                 )
                 mp_initial, _ = persist_ceap_dispatcher_run_metadata(
                     raw_writer,
@@ -1283,12 +1314,16 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     deputies_snapshot_path=snapshot_in_use_path,
                     deputies_snapshot_record_count=snapshot_in_use_record_count,
                     deputies_snapshot_status=snapshot_status_value,
+                    deputies_snapshot_pipeline_run_id=snapshot_in_use_pipeline_run_id,
                     error_type=et,
                     error_message=emessage,
                     total_tasks_success=int(rrf_abort.get("total_tasks_success", 0) or 0),
                     total_tasks_failed=int(rrf_abort.get("total_tasks_failed", 0) or 0),
                     total_tasks_poison=int(rrf_abort.get("total_tasks_poison", 0) or 0),
                     total_tasks_running=int(rrf_abort.get("total_tasks_running", 0) or 0),
+                    max_tasks_per_dispatch=max_per_tick,
+                    total_raw_files_written=int(pc_abort.get("pages_written_sum", 0) or 0),
+                    total_records_collected=int(pc_abort.get("record_count_sum", 0) or 0),
                 )
                 mp_fail, _ = persist_ceap_dispatcher_run_metadata(
                     raw_writer,
@@ -1403,7 +1438,19 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 + total_tasks_other_state
             )
         else:
-            total_tasks_expected = max(total_queued, total_tasks_expected)
+            # While still enqueuing, prefer the universe size (deputies × months).
+            # ``total_queued`` only reflects the messages dispatched so far in
+            # this tick, which underestimates ``total_tasks_expected`` early on
+            # and made metadata.json show 1000 (= max-per-tick) instead of 1026
+            # for daily/513×2.
+            projected_expected = (
+                int(total_deputies) * len(month_list)
+                if total_deputies > 0 and month_list
+                else 0
+            )
+            total_tasks_expected = max(
+                total_queued, total_tasks_expected, projected_expected
+            )
 
         all_finished = (
             total_tasks_running == 0
@@ -1490,6 +1537,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 "deputies_snapshot_first_execution_id": snapshot_execution_id,
                 "deputies_snapshot_date": snapshot_in_use_date,
                 "deputies_snapshot_path": snapshot_in_use_path,
+                "deputies_snapshot_pipeline_run_id": snapshot_in_use_pipeline_run_id,
                 "deputies_snapshot_record_count": snapshot_in_use_record_count,
                 "deputies_snapshot_source": snapshot_in_use_source,
             }
@@ -1728,12 +1776,20 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     or snapshot_status_value
                     or ""
                 ),
+                deputies_snapshot_pipeline_run_id=str(
+                    run_done.get("deputies_snapshot_pipeline_run_id")
+                    or snapshot_in_use_pipeline_run_id
+                    or ""
+                ),
                 error_type=str(err_type_final) if err_type_final else None,
                 error_message=str(err_msg_final) if err_msg_final else None,
                 total_tasks_success=int(pc_manifest["success"]),
                 total_tasks_failed=int(pc_manifest["failed"]),
                 total_tasks_poison=int(pc_manifest["poison"]),
                 total_tasks_running=int(pc_manifest["running"]),
+                max_tasks_per_dispatch=max_per_tick,
+                total_raw_files_written=int(pc_manifest.get("pages_written_sum", 0) or 0),
+                total_records_collected=int(pc_manifest.get("record_count_sum", 0) or 0),
             )
             mp_fin, _sp_fin = persist_ceap_dispatcher_run_metadata(
                 raw_writer,
@@ -1942,6 +1998,11 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                         deputies_snapshot_status=str(
                             loc_exc.get("snapshot_status_value") or ""
                         ),
+                        deputies_snapshot_pipeline_run_id=str(
+                            loc_exc.get("snapshot_in_use_pipeline_run_id")
+                            or r_ent.get("deputies_snapshot_pipeline_run_id")
+                            or ""
+                        ),
                         error_type=exc_t,
                         error_message=exc_msg,
                         total_tasks_success=int(
@@ -1956,6 +2017,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                         total_tasks_running=int(
                             r_ent.get("total_tasks_running", 0) or 0
                         ),
+                        max_tasks_per_dispatch=max_per_tick,
                     )
                     mp_ex, _ = persist_ceap_dispatcher_run_metadata(
                         rw_ex,
