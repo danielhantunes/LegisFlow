@@ -20,6 +20,14 @@
     "CEAP_LEGACY_MONOLITH_ENABLED": "false",
     "AzureWebJobs.ceap_expenses_ingestion_timer.Disabled": "true",
     "MAX_RETRY_ATTEMPTS": "3",
-    "ENABLE_CEAP_RESET_FUNCTION": "false"
+    "ENABLE_CEAP_RESET_FUNCTION": "false",
+
+    "REFERENCE_SNAPSHOT_DISPATCH_SCHEDULE": "0 */20 * * * *",
+    "REFERENCE_SNAPSHOT_QUEUE_NAME": "reference-snapshot-work",
+    "REFERENCE_SNAPSHOT_POISON_QUEUE_NAME": "reference-snapshot-work-poison",
+    "REFERENCE_TIMEZONE": "America/Sao_Paulo",
+    "REFERENCE_LOCK_TTL_MINUTES": "15",
+    "ENABLE_REFERENCE_RESET_FUNCTION": "false",
+    "ENABLE_RESET_FUNCTIONS": "false"
   }
 }

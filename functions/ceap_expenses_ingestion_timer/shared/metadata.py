@@ -130,6 +130,8 @@ def build_run_metadata(
     fanout: dict[str, Any] | None = None,
     snapshot: dict[str, Any] | None = None,
     dependencies: list[RunDependency] | None = None,
+    hash_strategy: str | None = None,
+    audit_fields_applied: tuple[str, ...] | list[str] | None = None,
     extras: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Builds a Raw ``metadata.json`` payload following schema v1.0.
@@ -169,6 +171,11 @@ def build_run_metadata(
 
     if dependencies:
         base["dependencies"] = [dict(dep) for dep in dependencies]
+
+    if hash_strategy:
+        base["hash_strategy"] = hash_strategy
+    if audit_fields_applied:
+        base["audit_fields_applied"] = list(audit_fields_applied)
 
     if extras:
         # Extras are merged last but never override mandatory keys.

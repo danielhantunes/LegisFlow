@@ -420,3 +420,163 @@ def enrich_deputies_page_payload(
                 new_items.append(item)
         new_payload["dados"] = new_items
     return new_payload
+
+
+# ---------------------------------------------------------------------------
+# Generic Raw audit envelope (used by all NEW domains: reference, votacoes,
+# proposicoes, eventos, institucional, discursos). The CEAP / deputies-list
+# helpers above predate this module and remain the source of truth for those
+# two domains; do not switch them silently — keep their hashes stable.
+# ---------------------------------------------------------------------------
+
+
+def build_generic_audit_block(
+    *,
+    pipeline_run_id: str,
+    execution_id: str,
+    domain: str,
+    entity: str,
+    endpoint: str,
+    api_path: str,
+    raw_path: str,
+    payload_hash: str,
+    page: int,
+    source_system: str = CEAP_SOURCE_SYSTEM,
+    api_base_url: str = CEAP_API_BASE_URL,
+    parent_id: int | str | None = None,
+    parent_entity: str | None = None,
+    reference_date: str | None = None,
+    ingested_at_utc: str | None = None,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Standard ``_audit`` envelope for any new-domain Raw page.
+
+    Mirrors :func:`build_ceap_audit_block` / :func:`build_deputies_audit_block`
+    but exposes optional placeholders (``parent_id``/``reference_date``) so the
+    same builder serves snapshots, fanout pages and watermark-driven pages.
+    Unknown ``extra`` keys are merged last (never overrides mandatory keys).
+    """
+    ingested = ingested_at_utc or now_utc_iso()
+    block: dict[str, Any] = {
+        "_metadata_version": "1.0",
+        "_pipeline_run_id": pipeline_run_id,
+        "_execution_id": execution_id,
+        "_source_system": source_system,
+        "_source_endpoint": endpoint,
+        "_api_base_url": api_base_url,
+        "_api_path": api_path,
+        "_entity": entity,
+        "_domain": domain,
+        "_page": int(page),
+        "_raw_path": raw_path,
+        "_ingested_at_utc": ingested,
+        "_loaded_at": ingested,
+        "_payload_hash": payload_hash,
+    }
+    if parent_id is not None:
+        block["_parent_id"] = parent_id
+    if parent_entity:
+        block["_parent_entity"] = parent_entity
+    if reference_date:
+        block["_reference_date"] = reference_date
+    if extra:
+        for k, v in extra.items():
+            block.setdefault(k, v)
+    return block
+
+
+def build_record_uid_from_keys(
+    *,
+    source_system: str,
+    entity: str,
+    business_keys: Mapping[str, Any],
+) -> str:
+    """Convenience wrapper around :func:`compute_record_uid`."""
+    return compute_record_uid(
+        source=source_system,
+        entity=entity,
+        business_keys=business_keys,
+    )
+
+
+def enrich_generic_page_payload(
+    payload: Mapping[str, Any],
+    *,
+    pipeline_run_id: str,
+    execution_id: str,
+    domain: str,
+    entity: str,
+    endpoint: str,
+    api_path: str,
+    raw_path: str,
+    page: int,
+    business_key_fields: tuple[str, ...] = ("id",),
+    source_system: str = CEAP_SOURCE_SYSTEM,
+    api_base_url: str = CEAP_API_BASE_URL,
+    parent_id: int | str | None = None,
+    parent_entity: str | None = None,
+    reference_date: str | None = None,
+    ingested_at_utc: str | None = None,
+    extra_audit: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Returns a new payload with ``_audit`` and per-item lineage fields.
+
+    Per item under ``dados``:
+
+    * ``_record_uid`` is derived from ``business_key_fields`` (defaults to
+      ``("id",)``); when none of the fields produce a non-null value the UID
+      is omitted (avoids generating a UID over an all-``None`` key set).
+    * ``_record_hash`` is the SHA-256 of the normalised record (excluding
+      audit/lineage keys), matching :func:`compute_record_hash`.
+
+    The function is side-effect free: the input payload is not mutated.
+    """
+    base_payload = _strip_audit(payload)
+    payload_hash = compute_payload_hash(base_payload)
+    enriched: dict[str, Any] = (
+        dict(base_payload) if isinstance(base_payload, Mapping) else {}
+    )
+    audit = build_generic_audit_block(
+        pipeline_run_id=pipeline_run_id,
+        execution_id=execution_id,
+        domain=domain,
+        entity=entity,
+        endpoint=endpoint,
+        api_path=api_path,
+        raw_path=raw_path,
+        payload_hash=payload_hash,
+        page=page,
+        source_system=source_system,
+        api_base_url=api_base_url,
+        parent_id=parent_id,
+        parent_entity=parent_entity,
+        reference_date=reference_date,
+        ingested_at_utc=ingested_at_utc,
+        extra=extra_audit,
+    )
+    new_payload: dict[str, Any] = {AUDIT_KEY: audit}
+    new_payload.update(enriched)
+
+    items = new_payload.get("dados")
+    if isinstance(items, list):
+        new_items: list[Any] = []
+        for item in items:
+            if isinstance(item, Mapping):
+                cleaned = {
+                    k: v
+                    for k, v in item.items()
+                    if k not in (RECORD_UID_KEY, RECORD_HASH_KEY)
+                }
+                key_values = {f: cleaned.get(f) for f in business_key_fields}
+                if any(v is not None for v in key_values.values()):
+                    cleaned[RECORD_UID_KEY] = build_record_uid_from_keys(
+                        source_system=source_system,
+                        entity=entity,
+                        business_keys=key_values,
+                    )
+                cleaned[RECORD_HASH_KEY] = compute_record_hash(cleaned)
+                new_items.append(cleaned)
+            else:
+                new_items.append(item)
+        new_payload["dados"] = new_items
+    return new_payload

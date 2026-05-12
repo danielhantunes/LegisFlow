@@ -35,3 +35,23 @@ class CamaraApiClient:
             f"{self.base_url}/deputados/{deputy_id}/despesas",
             params={"ano": ano, "mes": mes, "pagina": page, "itens": itens},
         )
+
+    def list_endpoint_page(
+        self,
+        path: str,
+        *,
+        page: int = 1,
+        itens: int = 100,
+        params: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], int]:
+        """Generic GET for paginated list endpoints (``pagina`` / ``itens``).
+
+        ``path`` may be a relative path (``/partidos``) or fully-formed URL.
+        ``params`` is merged on top of pagination params (callers can override
+        ``itens`` or add filters such as ``idLegislatura``).
+        """
+        url = path if path.startswith("http") else f"{self.base_url}{path}"
+        merged: dict[str, Any] = {"pagina": page, "itens": itens}
+        if params:
+            merged.update(params)
+        return self._get(url, params=merged)
