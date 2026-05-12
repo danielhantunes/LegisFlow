@@ -148,3 +148,163 @@ class CamaraApiClient:
             page=page,
             itens=itens,
         )
+
+    def list_eventos_page(
+        self,
+        *,
+        page: int = 1,
+        itens: int = 100,
+        date_start: str | None = None,
+        date_end: str | None = None,
+        ordenar_por: str = "dataHoraInicio",
+        ordem: str = "ASC",
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/eventos`` filtered by event window (``dataInicio``/``dataFim``)."""
+        params: dict[str, Any] = {
+            "ordenarPor": ordenar_por,
+            "ordem": ordem,
+        }
+        if date_start:
+            params["dataInicio"] = date_start
+        if date_end:
+            params["dataFim"] = date_end
+        return self.list_endpoint_page(
+            "/eventos", page=page, itens=itens, params=params
+        )
+
+    def list_evento_deputados_page(
+        self,
+        evento_id: str,
+        *,
+        page: int = 1,
+        itens: int = 100,
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/eventos/{id}/deputados`` paginated."""
+        return self.list_endpoint_page(
+            f"/eventos/{evento_id}/deputados", page=page, itens=itens
+        )
+
+    def list_evento_orgaos_page(
+        self,
+        evento_id: str,
+        *,
+        page: int = 1,
+        itens: int = 100,
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/eventos/{id}/orgaos`` paginated."""
+        return self.list_endpoint_page(
+            f"/eventos/{evento_id}/orgaos", page=page, itens=itens
+        )
+
+    def list_evento_pauta_page(
+        self,
+        evento_id: str,
+        *,
+        page: int = 1,
+        itens: int = 100,
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/eventos/{id}/pauta`` paginated."""
+        return self.list_endpoint_page(
+            f"/eventos/{evento_id}/pauta", page=page, itens=itens
+        )
+
+    def list_evento_votacoes_page(
+        self,
+        evento_id: str,
+        *,
+        page: int = 1,
+        itens: int = 100,
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/eventos/{id}/votacoes`` paginated."""
+        return self.list_endpoint_page(
+            f"/eventos/{evento_id}/votacoes", page=page, itens=itens
+        )
+
+    # --- institucional helpers ------------------------------------------------
+
+    def list_orgaos_page(
+        self, *, page: int = 1, itens: int = 100
+    ) -> tuple[dict[str, Any], int]:
+        return self.list_endpoint_page("/orgaos", page=page, itens=itens)
+
+    def list_partidos_page(
+        self, *, page: int = 1, itens: int = 100
+    ) -> tuple[dict[str, Any], int]:
+        return self.list_endpoint_page("/partidos", page=page, itens=itens)
+
+    def list_frentes_page(
+        self, *, page: int = 1, itens: int = 100
+    ) -> tuple[dict[str, Any], int]:
+        return self.list_endpoint_page("/frentes", page=page, itens=itens)
+
+    def list_legislaturas_page(
+        self, *, page: int = 1, itens: int = 100
+    ) -> tuple[dict[str, Any], int]:
+        return self.list_endpoint_page("/legislaturas", page=page, itens=itens)
+
+    def list_orgao_membros_page(
+        self, orgao_id: str, *, page: int = 1, itens: int = 100
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/orgaos/{id}/membros`` paginated."""
+        return self.list_endpoint_page(
+            f"/orgaos/{orgao_id}/membros", page=page, itens=itens
+        )
+
+    def list_partido_membros_page(
+        self, partido_id: str, *, page: int = 1, itens: int = 100
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/partidos/{id}/membros`` paginated."""
+        return self.list_endpoint_page(
+            f"/partidos/{partido_id}/membros", page=page, itens=itens
+        )
+
+    def list_frente_membros_page(
+        self, frente_id: str, *, page: int = 1, itens: int = 100
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/frentes/{id}/membros`` paginated."""
+        return self.list_endpoint_page(
+            f"/frentes/{frente_id}/membros", page=page, itens=itens
+        )
+
+    def list_legislatura_lideres_page(
+        self, legislatura_id: str, *, page: int = 1, itens: int = 100
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/legislaturas/{id}/lideres`` paginated."""
+        return self.list_endpoint_page(
+            f"/legislaturas/{legislatura_id}/lideres", page=page, itens=itens
+        )
+
+    def list_legislatura_mesa_page(
+        self, legislatura_id: str, *, page: int = 1, itens: int = 100
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/legislaturas/{id}/mesa`` paginated."""
+        return self.list_endpoint_page(
+            f"/legislaturas/{legislatura_id}/mesa", page=page, itens=itens
+        )
+
+    def list_deputado_discursos_page(
+        self,
+        deputado_id: str,
+        *,
+        page: int = 1,
+        itens: int = 100,
+        date_start: str | None = None,
+        date_end: str | None = None,
+        ordenar_por: str = "dataHoraInicio",
+        ordem: str = "ASC",
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/deputados/{id}/discursos`` filtered by speech window."""
+        params: dict[str, Any] = {
+            "ordenarPor": ordenar_por,
+            "ordem": ordem,
+        }
+        if date_start:
+            params["dataInicio"] = date_start
+        if date_end:
+            params["dataFim"] = date_end
+        return self.list_endpoint_page(
+            f"/deputados/{deputado_id}/discursos",
+            page=page,
+            itens=itens,
+            params=params,
+        )

@@ -6,10 +6,19 @@ import pytest
 
 from shared.domain_catalog import (
     CEAP_DOMAIN,
+    DISCURSOS_DOMAIN,
+    EVENTOS_DOMAIN,
+    INSTITUCIONAL_DOMAIN,
     PROPOSICOES_DOMAIN,
     REFERENCE_DOMAIN,
     VOTACOES_DOMAIN,
+    discursos_microbatch_run_id,
+    discursos_reconciliation_run_id,
+    eventos_microbatch_run_id,
+    eventos_reconciliation_run_id,
     get_domain,
+    institucional_daily_run_id,
+    institucional_reconciliation_run_id,
     is_well_formed_pipeline_run_id,
     list_domains,
     proposicoes_microbatch_run_id,
@@ -22,11 +31,22 @@ from shared.domain_catalog import (
 
 def test_known_domains_registered() -> None:
     names = {d.name for d in list_domains()}
-    assert {"ceap", "reference", "votacoes", "proposicoes"}.issubset(names)
+    assert {
+        "ceap",
+        "reference",
+        "votacoes",
+        "proposicoes",
+        "eventos",
+        "institucional",
+        "discursos",
+    }.issubset(names)
     assert get_domain("ceap") is CEAP_DOMAIN
     assert get_domain("reference") is REFERENCE_DOMAIN
     assert get_domain("votacoes") is VOTACOES_DOMAIN
     assert get_domain("proposicoes") is PROPOSICOES_DOMAIN
+    assert get_domain("eventos") is EVENTOS_DOMAIN
+    assert get_domain("institucional") is INSTITUCIONAL_DOMAIN
+    assert get_domain("discursos") is DISCURSOS_DOMAIN
 
 
 def test_get_domain_raises_for_unknown() -> None:
@@ -140,4 +160,132 @@ def test_proposicoes_domain_has_disjoint_prefixes() -> None:
     )
     assert not CEAP_DOMAIN.is_pipeline_run_id_owned_here(
         "proposicoes_reconciliation_20260511"
+    )
+
+
+def test_eventos_endpoints_cover_list_and_4_subendpoints() -> None:
+    declared = {ep.name for ep in EVENTOS_DOMAIN.endpoints}
+    assert {
+        "eventos",
+        "evento_deputados",
+        "evento_orgaos",
+        "evento_pauta",
+        "evento_votacoes",
+    } == declared
+    pauta = EVENTOS_DOMAIN.endpoint("evento_pauta")
+    assert pauta.path_template == "/eventos/{id}/pauta"
+    assert pauta.parent_field == "id"
+    # Pauta items use compound business key (ordem + nested proposicao_.id).
+    assert pauta.business_key_fields == ("ordem", "proposicao_.id")
+
+
+def test_eventos_microbatch_run_id_is_idempotent_per_minute() -> None:
+    pid_a = eventos_microbatch_run_id("2026-05-11T22:30")
+    pid_b = eventos_microbatch_run_id("2026-05-11T22:30")
+    assert pid_a == pid_b == "eventos_microbatch_202605112230"
+    assert EVENTOS_DOMAIN.is_pipeline_run_id_owned_here(pid_a)
+
+
+def test_eventos_reconciliation_run_id_format() -> None:
+    pid = eventos_reconciliation_run_id("2026-05-11")
+    assert pid == "eventos_reconciliation_20260511"
+    assert EVENTOS_DOMAIN.is_pipeline_run_id_owned_here(pid)
+
+
+def test_eventos_domain_has_disjoint_prefixes() -> None:
+    assert not EVENTOS_DOMAIN.is_pipeline_run_id_owned_here(
+        "proposicoes_microbatch_202605112230"
+    )
+    assert not PROPOSICOES_DOMAIN.is_pipeline_run_id_owned_here(
+        "eventos_microbatch_202605112230"
+    )
+    assert not VOTACOES_DOMAIN.is_pipeline_run_id_owned_here(
+        "eventos_microbatch_202605112230"
+    )
+
+
+def test_institucional_endpoints_cover_parents_and_5_workers() -> None:
+    declared = {ep.name for ep in INSTITUCIONAL_DOMAIN.endpoints}
+    assert {
+        "orgaos_parent",
+        "partidos_parent",
+        "frentes_parent",
+        "legislaturas_parent",
+        "orgao_membros",
+        "partido_membros",
+        "frente_membros",
+        "legislatura_lideres",
+        "legislatura_mesa",
+    } == declared
+    lideres = INSTITUCIONAL_DOMAIN.endpoint("legislatura_lideres")
+    assert lideres.path_template == "/legislaturas/{id}/lideres"
+    assert lideres.parent_field == "id"
+    # Lideres rows are uniquely identified by the parlamentar id + titulo + dataInicio.
+    assert lideres.business_key_fields == (
+        "parlamentar.id",
+        "titulo",
+        "dataInicio",
+    )
+
+
+def test_institucional_daily_run_id_is_idempotent_per_date() -> None:
+    pid_a = institucional_daily_run_id("2026-05-11")
+    pid_b = institucional_daily_run_id("2026-05-11")
+    assert pid_a == pid_b == "institucional_daily_20260511"
+    assert INSTITUCIONAL_DOMAIN.is_pipeline_run_id_owned_here(pid_a)
+
+
+def test_institucional_reconciliation_run_id_format() -> None:
+    pid = institucional_reconciliation_run_id("2026-05-11")
+    assert pid == "institucional_reconciliation_20260511"
+    assert INSTITUCIONAL_DOMAIN.is_pipeline_run_id_owned_here(pid)
+
+
+def test_institucional_domain_has_disjoint_prefixes() -> None:
+    assert not INSTITUCIONAL_DOMAIN.is_pipeline_run_id_owned_here(
+        "eventos_microbatch_202605112230"
+    )
+    assert not EVENTOS_DOMAIN.is_pipeline_run_id_owned_here(
+        "institucional_daily_20260511"
+    )
+    assert not REFERENCE_DOMAIN.is_pipeline_run_id_owned_here(
+        "institucional_daily_20260511"
+    )
+
+
+def test_discursos_endpoint_covers_only_deputado_discursos() -> None:
+    declared = {ep.name for ep in DISCURSOS_DOMAIN.endpoints}
+    assert declared == {"deputado_discursos"}
+    ep = DISCURSOS_DOMAIN.endpoint("deputado_discursos")
+    assert ep.path_template == "/deputados/{id}/discursos"
+    assert ep.parent_field == "id"
+    assert ep.business_key_fields == (
+        "dataHoraInicio",
+        "faseEvento.titulo",
+        "tipoDiscurso",
+    )
+
+
+def test_discursos_microbatch_run_id_is_idempotent_per_minute() -> None:
+    pid_a = discursos_microbatch_run_id("2026-05-11T22:30")
+    pid_b = discursos_microbatch_run_id("2026-05-11T22:30")
+    assert pid_a == pid_b == "discursos_microbatch_202605112230"
+    assert DISCURSOS_DOMAIN.is_pipeline_run_id_owned_here(pid_a)
+
+
+def test_discursos_reconciliation_run_id_format() -> None:
+    pid = discursos_reconciliation_run_id("2026-05-11")
+    assert pid == "discursos_reconciliation_20260511"
+    assert DISCURSOS_DOMAIN.is_pipeline_run_id_owned_here(pid)
+
+
+def test_discursos_domain_has_disjoint_prefixes() -> None:
+    assert not DISCURSOS_DOMAIN.is_pipeline_run_id_owned_here(
+        "eventos_microbatch_202605112230"
+    )
+    assert not DISCURSOS_DOMAIN.is_pipeline_run_id_owned_here(
+        "institucional_daily_20260511"
+    )
+    assert not CEAP_DOMAIN.is_pipeline_run_id_owned_here(
+        "discursos_microbatch_202605112230"
     )

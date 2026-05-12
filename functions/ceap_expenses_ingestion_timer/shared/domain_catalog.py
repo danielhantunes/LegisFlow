@@ -39,6 +39,7 @@ DEFAULT_MAX_TASKS_PER_DISPATCH = 1000
 # Validation phase schedules (item 15 of the expansion brief).
 SCHEDULE_EVERY_10_MIN = "0 */10 * * * *"
 SCHEDULE_EVERY_20_MIN = "0 */20 * * * *"
+SCHEDULE_DAILY_AT_06_UTC = "0 0 6 * * *"
 
 # Default microbatch lookback (votacoes): how far back the dispatcher scans on
 # every tick (overlap with the previous tick provides safety net for late
@@ -289,6 +290,228 @@ PROPOSICOES_DOMAIN = DomainSpec(
 )
 
 
+# --- Eventos (microbatch + fanout para 4 sub-endpoints) ---------------------
+EVENTOS_DOMAIN = DomainSpec(
+    name="eventos",
+    description=(
+        "Eventos: lista por janela (microbatch sobre dataInicio/dataFim) e "
+        "fanout para /eventos/{id}/{deputados,orgaos,pauta,votacoes}."
+    ),
+    pipeline_run_id_prefixes=(
+        "eventos_microbatch_",
+        "eventos_reconciliation_",
+    ),
+    queue_work="eventos-api-work",
+    queue_poison="eventos-api-work-poison",
+    state_partition_key="eventos_2026",
+    runs_partition_key="_runs_eventos",
+    locks_partition_key="_locks_eventos",
+    lock_row_key="eventos_dispatcher_lock",
+    schedule_cron=SCHEDULE_EVERY_20_MIN,
+    endpoints=(
+        EndpointSpec(
+            name="eventos",
+            path_template="/eventos",
+            paginated=True,
+            items_per_page=100,
+            business_key_fields=("id",),
+            raw_prefix="eventos/api/list",
+        ),
+        EndpointSpec(
+            # Deputies present in the event.
+            name="evento_deputados",
+            path_template="/eventos/{id}/deputados",
+            paginated=True,
+            items_per_page=100,
+            parent_field="id",
+            business_key_fields=("id",),
+            raw_prefix="eventos/api/deputados",
+        ),
+        EndpointSpec(
+            # Organs that took part in the event.
+            name="evento_orgaos",
+            path_template="/eventos/{id}/orgaos",
+            paginated=True,
+            items_per_page=100,
+            parent_field="id",
+            business_key_fields=("id",),
+            raw_prefix="eventos/api/orgaos",
+        ),
+        EndpointSpec(
+            # Agenda items for the event (pauta).
+            name="evento_pauta",
+            path_template="/eventos/{id}/pauta",
+            paginated=True,
+            items_per_page=100,
+            parent_field="id",
+            # Each pauta item is keyed by ordem + (proposicao_.id when present)
+            business_key_fields=("ordem", "proposicao_.id"),
+            raw_prefix="eventos/api/pauta",
+        ),
+        EndpointSpec(
+            # Votes that happened during the event.
+            name="evento_votacoes",
+            path_template="/eventos/{id}/votacoes",
+            paginated=True,
+            items_per_page=100,
+            parent_field="id",
+            business_key_fields=("id",),
+            raw_prefix="eventos/api/votacoes",
+        ),
+    ),
+    reset_feature_flag_env="ENABLE_EVENTOS_RESET_FUNCTION",
+)
+
+
+# --- Institucional (composição/lideranças) -----------------------------------
+# Dispatcher diário: lista parents (orgaos, partidos, frentes, legislaturas) e
+# faz fanout para os sub-endpoints temporais (membros / lideres / mesa). Estes
+# dados mudam pouco mas evoluem ao longo do tempo, e são distintos do snapshot
+# estático coberto pelo domínio "reference".
+INSTITUCIONAL_DOMAIN = DomainSpec(
+    name="institucional",
+    description=(
+        "Composição institucional (membros de órgãos/partidos/frentes, "
+        "lideranças e mesa diretora por legislatura)."
+    ),
+    pipeline_run_id_prefixes=(
+        "institucional_daily_",
+        "institucional_reconciliation_",
+    ),
+    queue_work="institucional-api-work",
+    queue_poison="institucional-api-work-poison",
+    state_partition_key="institucional_2026",
+    runs_partition_key="_runs_institucional",
+    locks_partition_key="_locks_institucional",
+    lock_row_key="institucional_dispatcher_lock",
+    schedule_cron=SCHEDULE_DAILY_AT_06_UTC,
+    endpoints=(
+        # --- parents (used only by the dispatcher to discover IDs) -----------
+        EndpointSpec(
+            name="orgaos_parent",
+            path_template="/orgaos",
+            paginated=True,
+            items_per_page=100,
+            business_key_fields=("id",),
+            raw_prefix="institucional/api/parents/orgaos",
+        ),
+        EndpointSpec(
+            name="partidos_parent",
+            path_template="/partidos",
+            paginated=True,
+            items_per_page=100,
+            business_key_fields=("id",),
+            raw_prefix="institucional/api/parents/partidos",
+        ),
+        EndpointSpec(
+            name="frentes_parent",
+            path_template="/frentes",
+            paginated=True,
+            items_per_page=100,
+            business_key_fields=("id",),
+            raw_prefix="institucional/api/parents/frentes",
+        ),
+        EndpointSpec(
+            name="legislaturas_parent",
+            path_template="/legislaturas",
+            paginated=True,
+            items_per_page=100,
+            business_key_fields=("id",),
+            raw_prefix="institucional/api/parents/legislaturas",
+        ),
+        # --- workers ---------------------------------------------------------
+        EndpointSpec(
+            name="orgao_membros",
+            path_template="/orgaos/{id}/membros",
+            paginated=True,
+            items_per_page=100,
+            parent_field="id",
+            # An órgão member is uniquely identified by the deputy id within
+            # the organ; titulo/dataInicio differ across mandates.
+            business_key_fields=("id", "dataInicio"),
+            raw_prefix="institucional/api/orgaos/membros",
+        ),
+        EndpointSpec(
+            name="partido_membros",
+            path_template="/partidos/{id}/membros",
+            paginated=True,
+            items_per_page=100,
+            parent_field="id",
+            business_key_fields=("id",),
+            raw_prefix="institucional/api/partidos/membros",
+        ),
+        EndpointSpec(
+            name="frente_membros",
+            path_template="/frentes/{id}/membros",
+            paginated=True,
+            items_per_page=100,
+            parent_field="id",
+            business_key_fields=("id",),
+            raw_prefix="institucional/api/frentes/membros",
+        ),
+        EndpointSpec(
+            name="legislatura_lideres",
+            path_template="/legislaturas/{id}/lideres",
+            paginated=True,
+            items_per_page=100,
+            parent_field="id",
+            # Leadership rows: parlamentar id + titulo + dataInicio
+            business_key_fields=("parlamentar.id", "titulo", "dataInicio"),
+            raw_prefix="institucional/api/legislaturas/lideres",
+        ),
+        EndpointSpec(
+            name="legislatura_mesa",
+            path_template="/legislaturas/{id}/mesa",
+            paginated=True,
+            items_per_page=100,
+            parent_field="id",
+            business_key_fields=("id", "titulo", "dataInicio"),
+            raw_prefix="institucional/api/legislaturas/mesa",
+        ),
+    ),
+    reset_feature_flag_env="ENABLE_INSTITUCIONAL_RESET_FUNCTION",
+)
+
+
+# --- Discursos (microbatch + fanout por deputado) ----------------------------
+# Dispatcher enfileira uma tarefa por deputado dentro de uma janela de tempo
+# (lookback configurável). O worker consulta /deputados/{id}/discursos com
+# dataInicio/dataFim cobrindo a janela e persiste as páginas com auditoria.
+DISCURSOS_DOMAIN = DomainSpec(
+    name="discursos",
+    description=(
+        "Discursos: fanout por deputado dentro de uma janela de tempo "
+        "(microbatch sobre dataInicio/dataFim de /deputados/{id}/discursos)."
+    ),
+    pipeline_run_id_prefixes=(
+        "discursos_microbatch_",
+        "discursos_reconciliation_",
+    ),
+    queue_work="discursos-api-work",
+    queue_poison="discursos-api-work-poison",
+    state_partition_key="discursos_2026",
+    runs_partition_key="_runs_discursos",
+    locks_partition_key="_locks_discursos",
+    lock_row_key="discursos_dispatcher_lock",
+    schedule_cron=SCHEDULE_EVERY_20_MIN,
+    endpoints=(
+        EndpointSpec(
+            name="deputado_discursos",
+            path_template="/deputados/{id}/discursos",
+            paginated=True,
+            items_per_page=100,
+            parent_field="id",
+            # A discurso row is uniquely identified by deputy + start time +
+            # phase + speech type (a single deputy can speak multiple times in
+            # the same minute under different fases/tipos).
+            business_key_fields=("dataHoraInicio", "faseEvento.titulo", "tipoDiscurso"),
+            raw_prefix="discursos/api/discursos",
+        ),
+    ),
+    reset_feature_flag_env="ENABLE_DISCURSOS_RESET_FUNCTION",
+)
+
+
 _PIPELINE_RUN_ID_RE = re.compile(r"^[a-z0-9_]{1,80}_\d{8}(?:\d{4})?$")
 
 
@@ -306,6 +529,9 @@ _DOMAINS: dict[str, DomainSpec] = {
     REFERENCE_DOMAIN.name: REFERENCE_DOMAIN,
     VOTACOES_DOMAIN.name: VOTACOES_DOMAIN,
     PROPOSICOES_DOMAIN.name: PROPOSICOES_DOMAIN,
+    EVENTOS_DOMAIN.name: EVENTOS_DOMAIN,
+    INSTITUCIONAL_DOMAIN.name: INSTITUCIONAL_DOMAIN,
+    DISCURSOS_DOMAIN.name: DISCURSOS_DOMAIN,
 }
 
 
@@ -376,3 +602,54 @@ def proposicoes_reconciliation_run_id(reference_date: str) -> str:
     if not compact:
         raise ValueError("reference_date must be YYYY-MM-DD")
     return f"proposicoes_reconciliation_{compact}"
+
+
+def eventos_microbatch_run_id(reference_minute_utc: str) -> str:
+    """``eventos_microbatch_YYYYMMDDHHMM`` (idempotent per minute)."""
+    raw = (reference_minute_utc or "").strip()
+    if not raw:
+        raise ValueError("reference_minute_utc must be YYYY-MM-DDTHH:MM")
+    compact = raw.replace("-", "").replace("T", "").replace(":", "")
+    if len(compact) < 12:
+        raise ValueError("reference_minute_utc must include minute")
+    return f"eventos_microbatch_{compact[:12]}"
+
+
+def eventos_reconciliation_run_id(reference_date: str) -> str:
+    compact = (reference_date or "").replace("-", "")
+    if not compact:
+        raise ValueError("reference_date must be YYYY-MM-DD")
+    return f"eventos_reconciliation_{compact}"
+
+
+def institucional_daily_run_id(reference_date: str) -> str:
+    """``institucional_daily_YYYYMMDD`` (idempotent per UTC date)."""
+    compact = (reference_date or "").replace("-", "")
+    if len(compact) != 8 or not compact.isdigit():
+        raise ValueError("reference_date must be YYYY-MM-DD")
+    return f"institucional_daily_{compact}"
+
+
+def institucional_reconciliation_run_id(reference_date: str) -> str:
+    compact = (reference_date or "").replace("-", "")
+    if len(compact) != 8 or not compact.isdigit():
+        raise ValueError("reference_date must be YYYY-MM-DD")
+    return f"institucional_reconciliation_{compact}"
+
+
+def discursos_microbatch_run_id(reference_minute_utc: str) -> str:
+    """``discursos_microbatch_YYYYMMDDHHMM`` (idempotent per minute)."""
+    raw = (reference_minute_utc or "").strip()
+    if not raw:
+        raise ValueError("reference_minute_utc must be YYYY-MM-DDTHH:MM")
+    compact = raw.replace("-", "").replace("T", "").replace(":", "")
+    if len(compact) < 12:
+        raise ValueError("reference_minute_utc must include minute")
+    return f"discursos_microbatch_{compact[:12]}"
+
+
+def discursos_reconciliation_run_id(reference_date: str) -> str:
+    compact = (reference_date or "").replace("-", "")
+    if len(compact) != 8 or not compact.isdigit():
+        raise ValueError("reference_date must be YYYY-MM-DD")
+    return f"discursos_reconciliation_{compact}"

@@ -219,6 +219,150 @@ variable "enable_proposicoes_reset_function" {
 }
 
 # ---------------------------------------------------------------------------
+# Eventos domain (/eventos + /eventos/{id}/{deputados|orgaos|pauta|votacoes})
+# ---------------------------------------------------------------------------
+
+variable "eventos_queue_name" {
+  type        = string
+  description = "Queue name for eventos work messages."
+  default     = "eventos-api-work"
+}
+
+variable "eventos_dispatch_schedule" {
+  type        = string
+  description = "CRON for the eventos dispatcher (every 20 minutes during validation)."
+  default     = "0 */20 * * * *"
+}
+
+variable "eventos_dispatch_granularity_min" {
+  type        = number
+  description = "Minute granularity used to derive the eventos microbatch pipeline_run_id."
+  default     = 20
+}
+
+variable "eventos_lookback_minutes" {
+  type        = number
+  description = "How far back the eventos dispatcher scans /eventos on every tick."
+  default     = 60
+}
+
+variable "eventos_lock_ttl_minutes" {
+  type        = number
+  description = "Dispatcher lock TTL in minutes for eventos domain."
+  default     = 15
+}
+
+variable "eventos_max_messages_per_tick" {
+  type        = number
+  description = "Cap on fanout messages enqueued by a single eventos dispatcher tick (counts all 4 sub-endpoints)."
+  default     = 1000
+}
+
+variable "eventos_max_list_pages" {
+  type        = number
+  description = "Maximum pages the eventos dispatcher will fetch from /eventos per tick."
+  default     = 200
+}
+
+variable "enable_eventos_reset_function" {
+  type        = bool
+  description = "Domain-specific feature flag for the eventos reset HTTP function."
+  default     = false
+}
+
+# ---------------------------------------------------------------------------
+# Institucional domain (composição/lideranças por orgao/partido/frente/legislatura)
+# ---------------------------------------------------------------------------
+
+variable "institucional_queue_name" {
+  type        = string
+  description = "Queue name for institucional work messages."
+  default     = "institucional-api-work"
+}
+
+variable "institucional_dispatch_schedule" {
+  type        = string
+  description = "CRON for the institucional dispatcher (daily at 06:00 UTC by default)."
+  default     = "0 0 6 * * *"
+}
+
+variable "institucional_lock_ttl_minutes" {
+  type        = number
+  description = "Dispatcher lock TTL in minutes for institucional domain."
+  default     = 30
+}
+
+variable "institucional_max_messages_per_tick" {
+  type        = number
+  description = "Cap on fanout messages enqueued by a single institucional dispatcher tick (counts all sub-endpoints)."
+  default     = 5000
+}
+
+variable "institucional_max_list_pages" {
+  type        = number
+  description = "Maximum pages the institucional dispatcher will fetch from each parent endpoint per tick."
+  default     = 200
+}
+
+variable "enable_institucional_reset_function" {
+  type        = bool
+  description = "Domain-specific feature flag for the institucional reset HTTP function."
+  default     = false
+}
+
+# ---------------------------------------------------------------------------
+# Discursos domain (/deputados/{id}/discursos)
+# ---------------------------------------------------------------------------
+
+variable "discursos_queue_name" {
+  type        = string
+  description = "Queue name for discursos work messages."
+  default     = "discursos-api-work"
+}
+
+variable "discursos_dispatch_schedule" {
+  type        = string
+  description = "CRON for the discursos dispatcher (every 20 minutes during validation)."
+  default     = "0 */20 * * * *"
+}
+
+variable "discursos_dispatch_granularity_min" {
+  type        = number
+  description = "Minute granularity used to derive the discursos microbatch pipeline_run_id."
+  default     = 20
+}
+
+variable "discursos_lookback_minutes" {
+  type        = number
+  description = "How far back the discursos worker scans /deputados/{id}/discursos on every tick."
+  default     = 120
+}
+
+variable "discursos_lock_ttl_minutes" {
+  type        = number
+  description = "Dispatcher lock TTL in minutes for discursos domain."
+  default     = 20
+}
+
+variable "discursos_max_messages_per_tick" {
+  type        = number
+  description = "Cap on fanout messages enqueued by a single discursos dispatcher tick (1 per deputy)."
+  default     = 1000
+}
+
+variable "discursos_max_list_pages" {
+  type        = number
+  description = "Maximum pages the discursos dispatcher will fetch from /deputados (parent listing) per tick."
+  default     = 20
+}
+
+variable "enable_discursos_reset_function" {
+  type        = bool
+  description = "Domain-specific feature flag for the discursos reset HTTP function."
+  default     = false
+}
+
+# ---------------------------------------------------------------------------
 # Global admin
 # ---------------------------------------------------------------------------
 

@@ -20,6 +20,9 @@ locals {
   reference_snapshot_poison_queue_name   = "${var.reference_snapshot_queue_name}-poison"
   votacoes_poison_queue_name             = "${var.votacoes_queue_name}-poison"
   proposicoes_poison_queue_name          = "${var.proposicoes_queue_name}-poison"
+  eventos_poison_queue_name              = "${var.eventos_queue_name}-poison"
+  institucional_poison_queue_name        = "${var.institucional_queue_name}-poison"
+  discursos_poison_queue_name            = "${var.discursos_queue_name}-poison"
 }
 
 resource "azurerm_storage_account" "function" {
@@ -94,6 +97,39 @@ resource "azurerm_storage_queue" "proposicoes_work" {
 
 resource "azurerm_storage_queue" "proposicoes_poison" {
   name                 = local.proposicoes_poison_queue_name
+  storage_account_name = azurerm_storage_account.function.name
+}
+
+# Eventos domain queues (work + poison).
+resource "azurerm_storage_queue" "eventos_work" {
+  name                 = var.eventos_queue_name
+  storage_account_name = azurerm_storage_account.function.name
+}
+
+resource "azurerm_storage_queue" "eventos_poison" {
+  name                 = local.eventos_poison_queue_name
+  storage_account_name = azurerm_storage_account.function.name
+}
+
+# Institucional domain queues (work + poison).
+resource "azurerm_storage_queue" "institucional_work" {
+  name                 = var.institucional_queue_name
+  storage_account_name = azurerm_storage_account.function.name
+}
+
+resource "azurerm_storage_queue" "institucional_poison" {
+  name                 = local.institucional_poison_queue_name
+  storage_account_name = azurerm_storage_account.function.name
+}
+
+# Discursos domain queues (work + poison).
+resource "azurerm_storage_queue" "discursos_work" {
+  name                 = var.discursos_queue_name
+  storage_account_name = azurerm_storage_account.function.name
+}
+
+resource "azurerm_storage_queue" "discursos_poison" {
+  name                 = local.discursos_poison_queue_name
   storage_account_name = azurerm_storage_account.function.name
 }
 
@@ -192,6 +228,37 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "PROPOSICOES_MAX_MESSAGES_PER_TICK"    = tostring(var.proposicoes_max_messages_per_tick)
     "PROPOSICOES_MAX_LIST_PAGES"           = tostring(var.proposicoes_max_list_pages)
     "ENABLE_PROPOSICOES_RESET_FUNCTION"    = var.enable_proposicoes_reset_function ? "true" : "false"
+
+    # ----- Eventos domain ---------------------------------------------------
+    "EVENTOS_DISPATCH_SCHEDULE"        = var.eventos_dispatch_schedule
+    "EVENTOS_DISPATCH_GRANULARITY_MIN" = tostring(var.eventos_dispatch_granularity_min)
+    "EVENTOS_LOOKBACK_MINUTES"         = tostring(var.eventos_lookback_minutes)
+    "EVENTOS_QUEUE_NAME"               = azurerm_storage_queue.eventos_work.name
+    "EVENTOS_POISON_QUEUE_NAME"        = azurerm_storage_queue.eventos_poison.name
+    "EVENTOS_LOCK_TTL_MINUTES"         = tostring(var.eventos_lock_ttl_minutes)
+    "EVENTOS_MAX_MESSAGES_PER_TICK"    = tostring(var.eventos_max_messages_per_tick)
+    "EVENTOS_MAX_LIST_PAGES"           = tostring(var.eventos_max_list_pages)
+    "ENABLE_EVENTOS_RESET_FUNCTION"    = var.enable_eventos_reset_function ? "true" : "false"
+
+    # ----- Institucional domain --------------------------------------------
+    "INSTITUCIONAL_DISPATCH_SCHEDULE"     = var.institucional_dispatch_schedule
+    "INSTITUCIONAL_QUEUE_NAME"            = azurerm_storage_queue.institucional_work.name
+    "INSTITUCIONAL_POISON_QUEUE_NAME"     = azurerm_storage_queue.institucional_poison.name
+    "INSTITUCIONAL_LOCK_TTL_MINUTES"      = tostring(var.institucional_lock_ttl_minutes)
+    "INSTITUCIONAL_MAX_MESSAGES_PER_TICK" = tostring(var.institucional_max_messages_per_tick)
+    "INSTITUCIONAL_MAX_LIST_PAGES"        = tostring(var.institucional_max_list_pages)
+    "ENABLE_INSTITUCIONAL_RESET_FUNCTION" = var.enable_institucional_reset_function ? "true" : "false"
+
+    # ----- Discursos domain -------------------------------------------------
+    "DISCURSOS_DISPATCH_SCHEDULE"        = var.discursos_dispatch_schedule
+    "DISCURSOS_DISPATCH_GRANULARITY_MIN" = tostring(var.discursos_dispatch_granularity_min)
+    "DISCURSOS_LOOKBACK_MINUTES"         = tostring(var.discursos_lookback_minutes)
+    "DISCURSOS_QUEUE_NAME"               = azurerm_storage_queue.discursos_work.name
+    "DISCURSOS_POISON_QUEUE_NAME"        = azurerm_storage_queue.discursos_poison.name
+    "DISCURSOS_LOCK_TTL_MINUTES"         = tostring(var.discursos_lock_ttl_minutes)
+    "DISCURSOS_MAX_MESSAGES_PER_TICK"    = tostring(var.discursos_max_messages_per_tick)
+    "DISCURSOS_MAX_LIST_PAGES"           = tostring(var.discursos_max_list_pages)
+    "ENABLE_DISCURSOS_RESET_FUNCTION"    = var.enable_discursos_reset_function ? "true" : "false"
 
     # ----- Global admin -----------------------------------------------------
     "ENABLE_RESET_FUNCTIONS" = var.enable_reset_functions ? "true" : "false"
