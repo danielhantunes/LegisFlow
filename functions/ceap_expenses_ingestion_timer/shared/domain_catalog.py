@@ -40,6 +40,11 @@ DEFAULT_MAX_TASKS_PER_DISPATCH = 1000
 SCHEDULE_EVERY_10_MIN = "0 */10 * * * *"
 SCHEDULE_EVERY_20_MIN = "0 */20 * * * *"
 
+# Default microbatch lookback (votacoes): how far back the dispatcher scans on
+# every tick (overlap with the previous tick provides safety net for late
+# upstream updates / clock skew).
+DEFAULT_MICROBATCH_LOOKBACK_MINUTES = 60
+
 
 @dataclass(frozen=True)
 class EndpointSpec:
@@ -181,6 +186,54 @@ REFERENCE_DOMAIN = DomainSpec(
 )
 
 
+# --- Votações (microbatch + reconciliation com fanout) -----------------------
+VOTACOES_DOMAIN = DomainSpec(
+    name="votacoes",
+    description=(
+        "Votações: lista por janela (microbatch) e fanout para "
+        "/votacoes/{id}/votos (um worker por votação)."
+    ),
+    pipeline_run_id_prefixes=(
+        "votacoes_microbatch_",
+        "votacoes_reconciliation_",
+    ),
+    queue_work="votacoes-api-work",
+    queue_poison="votacoes-api-work-poison",
+    state_partition_key="votacoes_2026",
+    runs_partition_key="_runs_votacoes",
+    locks_partition_key="_locks_votacoes",
+    lock_row_key="votacoes_dispatcher_lock",
+    schedule_cron=SCHEDULE_EVERY_10_MIN,
+    endpoints=(
+        EndpointSpec(
+            name="votacoes",
+            path_template="/votacoes",
+            paginated=True,
+            items_per_page=200,
+            business_key_fields=("id",),
+            raw_prefix="votacoes/api/list",
+        ),
+        EndpointSpec(
+            # NOTE: ``/votacoes/{id}/votos`` does NOT echo ``idVotacao`` in
+            # each item; the dispatcher/worker pass it via ``parent_id`` which
+            # is recorded in ``_audit._parent_id``. The per-record UID below
+            # uses ``deputado_.id`` + ``tipoVoto`` and is therefore unique
+            # *within* a votação's votes page set. Joins on (votacao_id,
+            # deputado_id) should always carry the parent context from
+            # ``_audit._parent_id`` (or the partition path).
+            name="votacao_votos",
+            path_template="/votacoes/{id}/votos",
+            paginated=True,
+            items_per_page=200,
+            parent_field="id",
+            business_key_fields=("deputado_.id", "tipoVoto"),
+            raw_prefix="votacoes/api/votos",
+        ),
+    ),
+    reset_feature_flag_env="ENABLE_VOTACOES_RESET_FUNCTION",
+)
+
+
 _PIPELINE_RUN_ID_RE = re.compile(r"^[a-z0-9_]{1,80}_\d{8}(?:\d{4})?$")
 
 
@@ -196,6 +249,7 @@ def is_well_formed_pipeline_run_id(pipeline_run_id: str) -> bool:
 _DOMAINS: dict[str, DomainSpec] = {
     CEAP_DOMAIN.name: CEAP_DOMAIN,
     REFERENCE_DOMAIN.name: REFERENCE_DOMAIN,
+    VOTACOES_DOMAIN.name: VOTACOES_DOMAIN,
 }
 
 
@@ -224,3 +278,27 @@ def reference_run_id_for_date(reference_date: str) -> str:
     if not compact:
         raise ValueError("reference_date must be YYYY-MM-DD")
     return f"reference_snapshot_{compact}"
+
+
+def votacoes_microbatch_run_id(reference_minute_utc: str) -> str:
+    """Deterministic pipeline_run_id for a votacoes microbatch tick.
+
+    ``reference_minute_utc`` is ``YYYY-MM-DDTHH:MM`` (anchor minute, UTC,
+    rounded down to the dispatch granularity). Returns
+    ``votacoes_microbatch_YYYYMMDDHHMM`` so two ticks on the same minute
+    produce the same id (idempotent retries).
+    """
+    raw = (reference_minute_utc or "").strip()
+    if not raw:
+        raise ValueError("reference_minute_utc must be YYYY-MM-DDTHH:MM")
+    compact = raw.replace("-", "").replace("T", "").replace(":", "")
+    if len(compact) < 12:
+        raise ValueError("reference_minute_utc must include minute")
+    return f"votacoes_microbatch_{compact[:12]}"
+
+
+def votacoes_reconciliation_run_id(reference_date: str) -> str:
+    compact = (reference_date or "").replace("-", "")
+    if not compact:
+        raise ValueError("reference_date must be YYYY-MM-DD")
+    return f"votacoes_reconciliation_{compact}"

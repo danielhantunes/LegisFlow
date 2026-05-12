@@ -138,3 +138,37 @@ def test_record_uid_omitted_when_all_business_keys_null() -> None:
     assert RECORD_UID_KEY not in enriched["dados"][0]
     # Hash always present, even without UID.
     assert RECORD_HASH_KEY in enriched["dados"][0]
+
+
+def test_dotted_business_key_resolves_into_nested_objects() -> None:
+    """Used by votacoes (``deputado_.id``); must work via the generic helper."""
+    payload = {
+        "dados": [
+            {
+                "tipoVoto": "Sim",
+                "deputado_": {"id": 100, "nome": "A"},
+            },
+            {
+                "tipoVoto": "Não",
+                "deputado_": {"id": 200, "nome": "B"},
+            },
+        ]
+    }
+    enriched = enrich_generic_page_payload(
+        payload,
+        pipeline_run_id="votacoes_microbatch_202605112230",
+        execution_id="exec-1",
+        domain="votacoes",
+        entity="votacao_votos",
+        endpoint="votacao_votos",
+        api_path="/votacoes/9999/votos",
+        raw_path="raw/.../page_1.json",
+        page=1,
+        business_key_fields=("deputado_.id", "tipoVoto"),
+        parent_id="9999",
+    )
+    items = enriched["dados"]
+    assert items[0][RECORD_UID_KEY]
+    assert items[1][RECORD_UID_KEY]
+    assert items[0][RECORD_UID_KEY] != items[1][RECORD_UID_KEY]
+    assert enriched[AUDIT_KEY]["_parent_id"] == "9999"

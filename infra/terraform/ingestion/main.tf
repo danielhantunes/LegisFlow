@@ -16,7 +16,9 @@ locals {
     0,
     24
   )
-  ceap_api_poison_queue_name = "${var.ceap_api_queue_name}-poison"
+  ceap_api_poison_queue_name             = "${var.ceap_api_queue_name}-poison"
+  reference_snapshot_poison_queue_name   = "${var.reference_snapshot_queue_name}-poison"
+  votacoes_poison_queue_name             = "${var.votacoes_queue_name}-poison"
 }
 
 resource "azurerm_storage_account" "function" {
@@ -58,6 +60,28 @@ resource "azurerm_storage_queue" "ceap_api_work" {
 
 resource "azurerm_storage_queue" "ceap_api_poison" {
   name                 = local.ceap_api_poison_queue_name
+  storage_account_name = azurerm_storage_account.function.name
+}
+
+# Reference snapshot domain queues (work + poison).
+resource "azurerm_storage_queue" "reference_snapshot_work" {
+  name                 = var.reference_snapshot_queue_name
+  storage_account_name = azurerm_storage_account.function.name
+}
+
+resource "azurerm_storage_queue" "reference_snapshot_poison" {
+  name                 = local.reference_snapshot_poison_queue_name
+  storage_account_name = azurerm_storage_account.function.name
+}
+
+# Votacoes domain queues (work + poison).
+resource "azurerm_storage_queue" "votacoes_work" {
+  name                 = var.votacoes_queue_name
+  storage_account_name = azurerm_storage_account.function.name
+}
+
+resource "azurerm_storage_queue" "votacoes_poison" {
+  name                 = local.votacoes_poison_queue_name
   storage_account_name = azurerm_storage_account.function.name
 }
 
@@ -124,7 +148,30 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "CEAP_LEGACY_MONOLITH_ENABLED" = "false"
     "AzureWebJobs.ceap_expenses_ingestion_timer.Disabled" = "true"
     "RAW_STORAGE_ACCOUNT_NAME" = var.lakehouse_storage_account_name
+    "LAKEHOUSE_FILESYSTEM_NAME" = "lakehouse"
     "MAX_RETRY_ATTEMPTS"       = tostring(var.max_retry_attempts)
+
+    # ----- Reference snapshot domain ----------------------------------------
+    "REFERENCE_SNAPSHOT_DISPATCH_SCHEDULE" = var.reference_snapshot_dispatch_schedule
+    "REFERENCE_SNAPSHOT_QUEUE_NAME"        = azurerm_storage_queue.reference_snapshot_work.name
+    "REFERENCE_SNAPSHOT_POISON_QUEUE_NAME" = azurerm_storage_queue.reference_snapshot_poison.name
+    "REFERENCE_TIMEZONE"                   = var.reference_timezone
+    "REFERENCE_LOCK_TTL_MINUTES"           = tostring(var.reference_lock_ttl_minutes)
+    "ENABLE_REFERENCE_RESET_FUNCTION"      = var.enable_reference_reset_function ? "true" : "false"
+
+    # ----- Votacoes domain --------------------------------------------------
+    "VOTACOES_DISPATCH_SCHEDULE"        = var.votacoes_dispatch_schedule
+    "VOTACOES_DISPATCH_GRANULARITY_MIN" = tostring(var.votacoes_dispatch_granularity_min)
+    "VOTACOES_LOOKBACK_MINUTES"         = tostring(var.votacoes_lookback_minutes)
+    "VOTACOES_QUEUE_NAME"               = azurerm_storage_queue.votacoes_work.name
+    "VOTACOES_POISON_QUEUE_NAME"        = azurerm_storage_queue.votacoes_poison.name
+    "VOTACOES_LOCK_TTL_MINUTES"         = tostring(var.votacoes_lock_ttl_minutes)
+    "VOTACOES_MAX_MESSAGES_PER_TICK"    = tostring(var.votacoes_max_messages_per_tick)
+    "VOTACOES_MAX_LIST_PAGES"           = tostring(var.votacoes_max_list_pages)
+    "ENABLE_VOTACOES_RESET_FUNCTION"    = var.enable_votacoes_reset_function ? "true" : "false"
+
+    # ----- Global admin -----------------------------------------------------
+    "ENABLE_RESET_FUNCTIONS" = var.enable_reset_functions ? "true" : "false"
   }
 
   tags = var.tags

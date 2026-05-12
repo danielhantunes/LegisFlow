@@ -7,18 +7,22 @@ import pytest
 from shared.domain_catalog import (
     CEAP_DOMAIN,
     REFERENCE_DOMAIN,
+    VOTACOES_DOMAIN,
     get_domain,
     is_well_formed_pipeline_run_id,
     list_domains,
     reference_run_id_for_date,
+    votacoes_microbatch_run_id,
+    votacoes_reconciliation_run_id,
 )
 
 
 def test_known_domains_registered() -> None:
     names = {d.name for d in list_domains()}
-    assert {"ceap", "reference"}.issubset(names)
+    assert {"ceap", "reference", "votacoes"}.issubset(names)
     assert get_domain("ceap") is CEAP_DOMAIN
     assert get_domain("reference") is REFERENCE_DOMAIN
+    assert get_domain("votacoes") is VOTACOES_DOMAIN
 
 
 def test_get_domain_raises_for_unknown() -> None:
@@ -61,3 +65,39 @@ def test_reference_domain_advertises_audit_strategy() -> None:
     assert "_payload_hash" in REFERENCE_DOMAIN.audit_fields
     assert "_record_uid" in REFERENCE_DOMAIN.audit_fields
     assert "_record_hash" in REFERENCE_DOMAIN.audit_fields
+
+
+def test_votacoes_endpoints_cover_list_and_votos() -> None:
+    declared = {ep.name for ep in VOTACOES_DOMAIN.endpoints}
+    assert {"votacoes", "votacao_votos"} == declared
+    votos = VOTACOES_DOMAIN.endpoint("votacao_votos")
+    assert votos.path_template == "/votacoes/{id}/votos"
+    assert votos.parent_field == "id"
+    # Avoid claiming `idVotacao` is in the per-vote payload (it isn't).
+    assert "idVotacao" not in votos.business_key_fields
+    assert "deputado_.id" in votos.business_key_fields
+
+
+def test_votacoes_microbatch_run_id_is_idempotent_per_minute() -> None:
+    pid_a = votacoes_microbatch_run_id("2026-05-11T22:30")
+    pid_b = votacoes_microbatch_run_id("2026-05-11T22:30")
+    assert pid_a == pid_b == "votacoes_microbatch_202605112230"
+    assert VOTACOES_DOMAIN.is_pipeline_run_id_owned_here(pid_a)
+
+
+def test_votacoes_reconciliation_run_id_format() -> None:
+    pid = votacoes_reconciliation_run_id("2026-05-11")
+    assert pid == "votacoes_reconciliation_20260511"
+    assert VOTACOES_DOMAIN.is_pipeline_run_id_owned_here(pid)
+
+
+def test_votacoes_domain_owns_only_its_prefixes() -> None:
+    assert VOTACOES_DOMAIN.is_pipeline_run_id_owned_here(
+        "votacoes_microbatch_202605112230"
+    )
+    assert not VOTACOES_DOMAIN.is_pipeline_run_id_owned_here(
+        "reference_snapshot_20260511"
+    )
+    assert not REFERENCE_DOMAIN.is_pipeline_run_id_owned_here(
+        "votacoes_microbatch_202605112230"
+    )

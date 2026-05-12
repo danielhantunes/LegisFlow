@@ -79,6 +79,103 @@ variable "max_retry_attempts" {
   default     = 3
 }
 
+# ---------------------------------------------------------------------------
+# Reference snapshot domain (/partidos, /legislaturas, /deputados, /frentes,
+# /orgaos)
+# ---------------------------------------------------------------------------
+
+variable "reference_snapshot_queue_name" {
+  type        = string
+  description = "Queue name for reference snapshot work messages."
+  default     = "reference-snapshot-work"
+}
+
+variable "reference_snapshot_dispatch_schedule" {
+  type        = string
+  description = "CRON for the reference snapshot dispatcher (every 20 minutes during validation)."
+  default     = "0 */20 * * * *"
+}
+
+variable "reference_timezone" {
+  type        = string
+  description = "Timezone used to derive reference_snapshot_YYYYMMDD."
+  default     = "America/Sao_Paulo"
+}
+
+variable "reference_lock_ttl_minutes" {
+  type        = number
+  description = "Dispatcher lock TTL in minutes for reference domain."
+  default     = 15
+}
+
+variable "enable_reference_reset_function" {
+  type        = bool
+  description = "Domain-specific feature flag for the reference reset HTTP function."
+  default     = false
+}
+
+# ---------------------------------------------------------------------------
+# Votações domain (/votacoes + /votacoes/{id}/votos, microbatch + fanout)
+# ---------------------------------------------------------------------------
+
+variable "votacoes_queue_name" {
+  type        = string
+  description = "Queue name for votacoes work messages."
+  default     = "votacoes-api-work"
+}
+
+variable "votacoes_dispatch_schedule" {
+  type        = string
+  description = "CRON for the votacoes dispatcher (every 10 minutes during validation)."
+  default     = "0 */10 * * * *"
+}
+
+variable "votacoes_dispatch_granularity_min" {
+  type        = number
+  description = "Minute granularity used to derive the microbatch pipeline_run_id (e.g. 10 → ...22:30)."
+  default     = 10
+}
+
+variable "votacoes_lookback_minutes" {
+  type        = number
+  description = "How far back the votacoes dispatcher scans /votacoes on every tick."
+  default     = 60
+}
+
+variable "votacoes_lock_ttl_minutes" {
+  type        = number
+  description = "Dispatcher lock TTL in minutes for votacoes domain."
+  default     = 15
+}
+
+variable "votacoes_max_messages_per_tick" {
+  type        = number
+  description = "Cap on fanout messages enqueued by a single votacoes dispatcher tick."
+  default     = 500
+}
+
+variable "votacoes_max_list_pages" {
+  type        = number
+  description = "Maximum pages the votacoes dispatcher will fetch from /votacoes per tick."
+  default     = 200
+}
+
+variable "enable_votacoes_reset_function" {
+  type        = bool
+  description = "Domain-specific feature flag for the votacoes reset HTTP function."
+  default     = false
+}
+
+# ---------------------------------------------------------------------------
+# Global admin
+# ---------------------------------------------------------------------------
+
+variable "enable_reset_functions" {
+  type        = bool
+  description = "Global kill-switch enabling all *_reset HTTP functions across domains."
+  default     = false
+}
+
 variable "tags" {
   type        = map(string)
   description = "Common tags applied to all resources."

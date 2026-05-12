@@ -499,6 +499,20 @@ def build_record_uid_from_keys(
     )
 
 
+def _resolve_dotted(item: Mapping[str, Any], path: str) -> Any:
+    """Resolve a dotted path (``a.b.c``) inside a Mapping, returning ``None``
+    when any intermediate node is missing or non-mapping."""
+    if "." not in path:
+        return item.get(path)
+    cur: Any = item
+    for part in path.split("."):
+        if isinstance(cur, Mapping):
+            cur = cur.get(part)
+        else:
+            return None
+    return cur
+
+
 def enrich_generic_page_payload(
     payload: Mapping[str, Any],
     *,
@@ -567,7 +581,9 @@ def enrich_generic_page_payload(
                     for k, v in item.items()
                     if k not in (RECORD_UID_KEY, RECORD_HASH_KEY)
                 }
-                key_values = {f: cleaned.get(f) for f in business_key_fields}
+                key_values = {
+                    f: _resolve_dotted(cleaned, f) for f in business_key_fields
+                }
                 if any(v is not None for v in key_values.values()):
                     cleaned[RECORD_UID_KEY] = build_record_uid_from_keys(
                         source_system=source_system,

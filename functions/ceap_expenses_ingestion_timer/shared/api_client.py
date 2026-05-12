@@ -55,3 +55,40 @@ class CamaraApiClient:
         if params:
             merged.update(params)
         return self._get(url, params=merged)
+
+    def list_votacoes_page(
+        self,
+        *,
+        page: int = 1,
+        itens: int = 200,
+        date_start: str | None = None,
+        date_end: str | None = None,
+        ordenar_por: str = "dataHoraRegistro",
+        ordem: str = "DESC",
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/votacoes`` with optional date window (microbatch / recon)."""
+        params: dict[str, Any] = {
+            "ordenarPor": ordenar_por,
+            "ordem": ordem,
+        }
+        if date_start:
+            params["dataInicio"] = date_start
+        if date_end:
+            params["dataFim"] = date_end
+        return self.list_endpoint_page(
+            "/votacoes", page=page, itens=itens, params=params
+        )
+
+    def list_votacao_votos_page(
+        self,
+        votacao_id: str,
+        *,
+        page: int = 1,
+        itens: int = 200,
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/votacoes/{id}/votos`` paginated."""
+        return self.list_endpoint_page(
+            f"/votacoes/{votacao_id}/votos",
+            page=page,
+            itens=itens,
+        )
