@@ -6,11 +6,14 @@ import pytest
 
 from shared.domain_catalog import (
     CEAP_DOMAIN,
+    PROPOSICOES_DOMAIN,
     REFERENCE_DOMAIN,
     VOTACOES_DOMAIN,
     get_domain,
     is_well_formed_pipeline_run_id,
     list_domains,
+    proposicoes_microbatch_run_id,
+    proposicoes_reconciliation_run_id,
     reference_run_id_for_date,
     votacoes_microbatch_run_id,
     votacoes_reconciliation_run_id,
@@ -19,10 +22,11 @@ from shared.domain_catalog import (
 
 def test_known_domains_registered() -> None:
     names = {d.name for d in list_domains()}
-    assert {"ceap", "reference", "votacoes"}.issubset(names)
+    assert {"ceap", "reference", "votacoes", "proposicoes"}.issubset(names)
     assert get_domain("ceap") is CEAP_DOMAIN
     assert get_domain("reference") is REFERENCE_DOMAIN
     assert get_domain("votacoes") is VOTACOES_DOMAIN
+    assert get_domain("proposicoes") is PROPOSICOES_DOMAIN
 
 
 def test_get_domain_raises_for_unknown() -> None:
@@ -100,4 +104,40 @@ def test_votacoes_domain_owns_only_its_prefixes() -> None:
     )
     assert not REFERENCE_DOMAIN.is_pipeline_run_id_owned_here(
         "votacoes_microbatch_202605112230"
+    )
+
+
+def test_proposicoes_endpoints_cover_list_autores_tramitacoes() -> None:
+    declared = {ep.name for ep in PROPOSICOES_DOMAIN.endpoints}
+    assert {"proposicoes", "proposicao_autores", "proposicao_tramitacoes"} == declared
+    autores = PROPOSICOES_DOMAIN.endpoint("proposicao_autores")
+    assert autores.path_template == "/proposicoes/{id}/autores"
+    assert autores.parent_field == "id"
+    tramitacoes = PROPOSICOES_DOMAIN.endpoint("proposicao_tramitacoes")
+    assert tramitacoes.path_template == "/proposicoes/{id}/tramitacoes"
+    assert tramitacoes.business_key_fields == ("sequencia", "dataHora")
+
+
+def test_proposicoes_microbatch_run_id_is_idempotent_per_minute() -> None:
+    pid_a = proposicoes_microbatch_run_id("2026-05-11T22:30")
+    pid_b = proposicoes_microbatch_run_id("2026-05-11T22:30")
+    assert pid_a == pid_b == "proposicoes_microbatch_202605112230"
+    assert PROPOSICOES_DOMAIN.is_pipeline_run_id_owned_here(pid_a)
+
+
+def test_proposicoes_reconciliation_run_id_format() -> None:
+    pid = proposicoes_reconciliation_run_id("2026-05-11")
+    assert pid == "proposicoes_reconciliation_20260511"
+    assert PROPOSICOES_DOMAIN.is_pipeline_run_id_owned_here(pid)
+
+
+def test_proposicoes_domain_has_disjoint_prefixes() -> None:
+    assert not PROPOSICOES_DOMAIN.is_pipeline_run_id_owned_here(
+        "votacoes_microbatch_202605112230"
+    )
+    assert not VOTACOES_DOMAIN.is_pipeline_run_id_owned_here(
+        "proposicoes_microbatch_202605112230"
+    )
+    assert not CEAP_DOMAIN.is_pipeline_run_id_owned_here(
+        "proposicoes_reconciliation_20260511"
     )

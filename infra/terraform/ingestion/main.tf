@@ -19,6 +19,7 @@ locals {
   ceap_api_poison_queue_name             = "${var.ceap_api_queue_name}-poison"
   reference_snapshot_poison_queue_name   = "${var.reference_snapshot_queue_name}-poison"
   votacoes_poison_queue_name             = "${var.votacoes_queue_name}-poison"
+  proposicoes_poison_queue_name          = "${var.proposicoes_queue_name}-poison"
 }
 
 resource "azurerm_storage_account" "function" {
@@ -82,6 +83,17 @@ resource "azurerm_storage_queue" "votacoes_work" {
 
 resource "azurerm_storage_queue" "votacoes_poison" {
   name                 = local.votacoes_poison_queue_name
+  storage_account_name = azurerm_storage_account.function.name
+}
+
+# Proposicoes domain queues (work + poison).
+resource "azurerm_storage_queue" "proposicoes_work" {
+  name                 = var.proposicoes_queue_name
+  storage_account_name = azurerm_storage_account.function.name
+}
+
+resource "azurerm_storage_queue" "proposicoes_poison" {
+  name                 = local.proposicoes_poison_queue_name
   storage_account_name = azurerm_storage_account.function.name
 }
 
@@ -169,6 +181,17 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "VOTACOES_MAX_MESSAGES_PER_TICK"    = tostring(var.votacoes_max_messages_per_tick)
     "VOTACOES_MAX_LIST_PAGES"           = tostring(var.votacoes_max_list_pages)
     "ENABLE_VOTACOES_RESET_FUNCTION"    = var.enable_votacoes_reset_function ? "true" : "false"
+
+    # ----- Proposicoes domain ----------------------------------------------
+    "PROPOSICOES_DISPATCH_SCHEDULE"        = var.proposicoes_dispatch_schedule
+    "PROPOSICOES_DISPATCH_GRANULARITY_MIN" = tostring(var.proposicoes_dispatch_granularity_min)
+    "PROPOSICOES_LOOKBACK_MINUTES"         = tostring(var.proposicoes_lookback_minutes)
+    "PROPOSICOES_QUEUE_NAME"               = azurerm_storage_queue.proposicoes_work.name
+    "PROPOSICOES_POISON_QUEUE_NAME"        = azurerm_storage_queue.proposicoes_poison.name
+    "PROPOSICOES_LOCK_TTL_MINUTES"         = tostring(var.proposicoes_lock_ttl_minutes)
+    "PROPOSICOES_MAX_MESSAGES_PER_TICK"    = tostring(var.proposicoes_max_messages_per_tick)
+    "PROPOSICOES_MAX_LIST_PAGES"           = tostring(var.proposicoes_max_list_pages)
+    "ENABLE_PROPOSICOES_RESET_FUNCTION"    = var.enable_proposicoes_reset_function ? "true" : "false"
 
     # ----- Global admin -----------------------------------------------------
     "ENABLE_RESET_FUNCTIONS" = var.enable_reset_functions ? "true" : "false"

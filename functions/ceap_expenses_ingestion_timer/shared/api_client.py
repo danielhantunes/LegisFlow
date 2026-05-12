@@ -92,3 +92,59 @@ class CamaraApiClient:
             page=page,
             itens=itens,
         )
+
+    def list_proposicoes_page(
+        self,
+        *,
+        page: int = 1,
+        itens: int = 100,
+        date_start: str | None = None,
+        date_end: str | None = None,
+        ordenar_por: str = "id",
+        ordem: str = "ASC",
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/proposicoes`` filtered by tramitação update window.
+
+        ``dataInicio`` / ``dataFim`` filter by **last tramitação update**
+        (``YYYY-MM-DD``), which is what we want for microbatch (re-process
+        every proposition whose tramitação changed in the window).
+        """
+        params: dict[str, Any] = {
+            "ordenarPor": ordenar_por,
+            "ordem": ordem,
+        }
+        if date_start:
+            params["dataInicio"] = date_start
+        if date_end:
+            params["dataFim"] = date_end
+        return self.list_endpoint_page(
+            "/proposicoes", page=page, itens=itens, params=params
+        )
+
+    def list_proposicao_autores_page(
+        self,
+        proposicao_id: str,
+        *,
+        page: int = 1,
+        itens: int = 100,
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/proposicoes/{id}/autores`` paginated."""
+        return self.list_endpoint_page(
+            f"/proposicoes/{proposicao_id}/autores",
+            page=page,
+            itens=itens,
+        )
+
+    def list_proposicao_tramitacoes_page(
+        self,
+        proposicao_id: str,
+        *,
+        page: int = 1,
+        itens: int = 100,
+    ) -> tuple[dict[str, Any], int]:
+        """GET ``/proposicoes/{id}/tramitacoes`` paginated."""
+        return self.list_endpoint_page(
+            f"/proposicoes/{proposicao_id}/tramitacoes",
+            page=page,
+            itens=itens,
+        )

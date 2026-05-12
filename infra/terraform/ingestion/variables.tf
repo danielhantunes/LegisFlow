@@ -167,6 +167,58 @@ variable "enable_votacoes_reset_function" {
 }
 
 # ---------------------------------------------------------------------------
+# Proposicoes domain (/proposicoes + /proposicoes/{id}/{autores|tramitacoes})
+# ---------------------------------------------------------------------------
+
+variable "proposicoes_queue_name" {
+  type        = string
+  description = "Queue name for proposicoes work messages."
+  default     = "proposicoes-api-work"
+}
+
+variable "proposicoes_dispatch_schedule" {
+  type        = string
+  description = "CRON for the proposicoes dispatcher (every 20 minutes during validation)."
+  default     = "0 */20 * * * *"
+}
+
+variable "proposicoes_dispatch_granularity_min" {
+  type        = number
+  description = "Minute granularity used to derive the microbatch pipeline_run_id."
+  default     = 20
+}
+
+variable "proposicoes_lookback_minutes" {
+  type        = number
+  description = "How far back the proposicoes dispatcher scans /proposicoes on every tick."
+  default     = 60
+}
+
+variable "proposicoes_lock_ttl_minutes" {
+  type        = number
+  description = "Dispatcher lock TTL in minutes for proposicoes domain."
+  default     = 15
+}
+
+variable "proposicoes_max_messages_per_tick" {
+  type        = number
+  description = "Cap on fanout messages enqueued by a single proposicoes dispatcher tick (counts both sub-endpoints)."
+  default     = 1000
+}
+
+variable "proposicoes_max_list_pages" {
+  type        = number
+  description = "Maximum pages the proposicoes dispatcher will fetch from /proposicoes per tick."
+  default     = 200
+}
+
+variable "enable_proposicoes_reset_function" {
+  type        = bool
+  description = "Domain-specific feature flag for the proposicoes reset HTTP function."
+  default     = false
+}
+
+# ---------------------------------------------------------------------------
 # Global admin
 # ---------------------------------------------------------------------------
 

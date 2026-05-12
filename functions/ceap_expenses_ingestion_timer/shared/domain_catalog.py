@@ -234,6 +234,61 @@ VOTACOES_DOMAIN = DomainSpec(
 )
 
 
+# --- Proposições (microbatch + fanout para autores e tramitações) -----------
+PROPOSICOES_DOMAIN = DomainSpec(
+    name="proposicoes",
+    description=(
+        "Proposições: lista por janela (microbatch sobre dataInicio/dataFim "
+        "= última atualização de tramitação) e fanout para "
+        "/proposicoes/{id}/autores e /proposicoes/{id}/tramitacoes."
+    ),
+    pipeline_run_id_prefixes=(
+        "proposicoes_microbatch_",
+        "proposicoes_reconciliation_",
+    ),
+    queue_work="proposicoes-api-work",
+    queue_poison="proposicoes-api-work-poison",
+    state_partition_key="proposicoes_2026",
+    runs_partition_key="_runs_proposicoes",
+    locks_partition_key="_locks_proposicoes",
+    lock_row_key="proposicoes_dispatcher_lock",
+    schedule_cron=SCHEDULE_EVERY_20_MIN,
+    endpoints=(
+        EndpointSpec(
+            name="proposicoes",
+            path_template="/proposicoes",
+            paginated=True,
+            items_per_page=100,
+            business_key_fields=("id",),
+            raw_prefix="proposicoes/api/list",
+        ),
+        EndpointSpec(
+            name="proposicao_autores",
+            path_template="/proposicoes/{id}/autores",
+            paginated=True,
+            items_per_page=100,
+            parent_field="id",
+            # Per-author records expose ``codTipo`` + ``proponente`` etc., but
+            # ``id`` of the parlamentar isn't always present (some authors are
+            # external actors). Use the URI as deterministic UID source.
+            business_key_fields=("uri",),
+            raw_prefix="proposicoes/api/autores",
+        ),
+        EndpointSpec(
+            name="proposicao_tramitacoes",
+            path_template="/proposicoes/{id}/tramitacoes",
+            paginated=True,
+            items_per_page=100,
+            parent_field="id",
+            # Each tramitação is uniquely identified by sequence + dataHora.
+            business_key_fields=("sequencia", "dataHora"),
+            raw_prefix="proposicoes/api/tramitacoes",
+        ),
+    ),
+    reset_feature_flag_env="ENABLE_PROPOSICOES_RESET_FUNCTION",
+)
+
+
 _PIPELINE_RUN_ID_RE = re.compile(r"^[a-z0-9_]{1,80}_\d{8}(?:\d{4})?$")
 
 
@@ -250,6 +305,7 @@ _DOMAINS: dict[str, DomainSpec] = {
     CEAP_DOMAIN.name: CEAP_DOMAIN,
     REFERENCE_DOMAIN.name: REFERENCE_DOMAIN,
     VOTACOES_DOMAIN.name: VOTACOES_DOMAIN,
+    PROPOSICOES_DOMAIN.name: PROPOSICOES_DOMAIN,
 }
 
 
@@ -302,3 +358,21 @@ def votacoes_reconciliation_run_id(reference_date: str) -> str:
     if not compact:
         raise ValueError("reference_date must be YYYY-MM-DD")
     return f"votacoes_reconciliation_{compact}"
+
+
+def proposicoes_microbatch_run_id(reference_minute_utc: str) -> str:
+    """``proposicoes_microbatch_YYYYMMDDHHMM`` (idempotent per minute)."""
+    raw = (reference_minute_utc or "").strip()
+    if not raw:
+        raise ValueError("reference_minute_utc must be YYYY-MM-DDTHH:MM")
+    compact = raw.replace("-", "").replace("T", "").replace(":", "")
+    if len(compact) < 12:
+        raise ValueError("reference_minute_utc must include minute")
+    return f"proposicoes_microbatch_{compact[:12]}"
+
+
+def proposicoes_reconciliation_run_id(reference_date: str) -> str:
+    compact = (reference_date or "").replace("-", "")
+    if not compact:
+        raise ValueError("reference_date must be YYYY-MM-DD")
+    return f"proposicoes_reconciliation_{compact}"
