@@ -14,6 +14,7 @@ from shared.domain_catalog import (
     PROPOSICOES_DOMAIN,
     REFERENCE_DOMAIN,
     VOTACOES_DOMAIN,
+    discursos_daily_run_id,
     discursos_microbatch_run_id,
     discursos_reconciliation_run_id,
     eventos_daily_run_id,
@@ -290,6 +291,12 @@ def test_discursos_microbatch_run_id_is_idempotent_per_minute() -> None:
     pid_b = discursos_microbatch_run_id("2026-05-11T22:30")
     assert pid_a == pid_b == "discursos_microbatch_202605112230"
     assert DISCURSOS_DOMAIN.is_pipeline_run_id_owned_here(pid_a)
+
+
+def test_discursos_daily_run_id_format() -> None:
+    pid = discursos_daily_run_id("2026-05-11")
+    assert pid == "discursos_daily_20260511"
+    assert DISCURSOS_DOMAIN.is_pipeline_run_id_owned_here(pid)
 
 
 def test_discursos_reconciliation_run_id_format() -> None:

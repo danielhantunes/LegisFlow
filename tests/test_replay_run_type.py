@@ -21,6 +21,7 @@ def test_microbatch_run_id() -> None:
 
 def test_daily_run_id() -> None:
     assert infer_run_type_for_requeued_work("eventos_daily_20260512") == "daily"
+    assert infer_run_type_for_requeued_work("discursos_daily_20260512") == "daily"
 
 
 def test_replay_and_other_ids_default_to_manual() -> None:

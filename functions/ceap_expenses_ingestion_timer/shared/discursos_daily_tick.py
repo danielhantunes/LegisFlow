@@ -1,111 +1,59 @@
-"""Timer: discursos dispatcher (microbatch + fanout per deputado).
-
-Each tick:
-
-1. Computes ``discursos_microbatch_YYYYMMDDHHMM`` (rounded to
-   ``DISCURSOS_DISPATCH_GRANULARITY_MIN``).
-2. Acquires the discursos dispatcher lock.
-3. Lists ``/deputados`` (active for current legislatura), persists pages with
-   audit envelope under
-   ``raw/camara/discursos/api/deputies_snapshot/pipeline_run_id={pid}/...``.
-4. For each deputado_id, enqueues one ``DomainWorkMessage`` carrying the
-   lookback window (``DISCURSOS_LOOKBACK_MINUTES``).
-5. Reconciles run counters from ``IngestionState`` and writes the aggregate
-   ``metadata.json`` (+ ``_SUCCESS`` only when strictly completed).
-"""
+"""Daily discursos dispatcher tick: list ``/deputados``, single JSONL snapshot, hash-aware fanout."""
 
 from __future__ import annotations
 
 import json
 import os
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 
-import azure.functions as func
-
-from shared.adls_writer import AdlsRawWriter
-from shared.api_client import CamaraApiClient
-from shared.discursos_raw_manifest import (
+from .adls_writer import AdlsRawWriter
+from .api_client import CamaraApiClient
+from .discursos_raw_manifest import (
     DISCURSOS_BASE_PREFIX,
     build_discursos_dispatcher_run_metadata,
     persist_discursos_run_metadata,
 )
-from shared.discursos_reconciliation_tick import (
-    default_discursos_reconciliation_dates,
-    execute_discursos_reconciliation_tick,
-)
-from shared.domain_catalog import (
-    DEFAULT_MICROBATCH_LOOKBACK_MINUTES,
-    DISCURSOS_DOMAIN,
-    discursos_microbatch_run_id,
-)
-from shared.generic_partition_state import GenericPartitionStateStore
-from shared.logger import get_logger, log_structured
-from shared.queue_helpers import (
-    prepare_queue_client_for_dispatch,
-    send_json_message_with_client,
-)
-from shared.queue_messages import DomainWorkMessage
-from shared.raw_audit import enrich_generic_page_payload
-from shared.run_registry import GenericRunRegistry
+from .domain_catalog import DISCURSOS_DOMAIN, discursos_daily_run_id
+from .generic_partition_state import GenericPartitionStateStore
+from .logger import get_logger, log_structured
+from .queue_helpers import prepare_queue_client_for_dispatch, send_json_message_with_client
+from .queue_messages import DomainWorkMessage
+from .raw_audit import enrich_generic_page_payload
+from .run_registry import GenericRunRegistry
+from .votacoes_api_dispatcher_logic import list_item_uid_hash
 
 logger = get_logger()
 
 
 def _state_row_key(deputado_id: str) -> str:
-    """One IngestionState row per deputado (single sub-endpoint)."""
     return f"deputado_discursos|{deputado_id}"
 
 
-def _round_minute_down(now: datetime, granularity_min: int) -> datetime:
-    minute = (now.minute // granularity_min) * granularity_min
-    return now.replace(minute=minute, second=0, microsecond=0)
+def _daily_api_date_window(*, now: datetime) -> tuple[str, str, datetime, datetime]:
+    """Calendar window for ``/deputados/{id}/discursos`` date filters (inclusive days)."""
+    now_utc = now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
+    end_d = now_utc.date()
+    span = max(
+        1,
+        min(366, int(os.getenv("DISCURSOS_DAILY_LOOKBACK_DAYS", "7"))),
+    )
+    start_d = end_d - timedelta(days=span - 1)
+    date_start = start_d.isoformat()
+    date_end = end_d.isoformat()
+    window_start = datetime.combine(start_d, time.min, tzinfo=UTC)
+    window_end = datetime.combine(
+        end_d, time.max.replace(microsecond=999999), tzinfo=UTC
+    )
+    return date_start, date_end, window_start, window_end
 
 
-def _fmt_window_param(dt: datetime) -> str:
-    """API date filter uses YYYY-MM-DD (event-day-based)."""
-    return dt.date().isoformat()
-
-
-def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
+def execute_discursos_daily_tick(*, now: datetime) -> None:
     domain = DISCURSOS_DOMAIN
-    now = datetime.now(UTC)
-    recon_day = max(1, min(28, int(os.getenv("DISCURSOS_RECONCILIATION_DAY", "25"))))
-    lookback_days = max(
-        1, int(os.getenv("DISCURSOS_RECONCILIATION_LOOKBACK_DAYS", "90"))
-    )
-    if now.day == recon_day:
-        ds, de = default_discursos_reconciliation_dates(
-            now=now, lookback_days=lookback_days
-        )
-        execute_discursos_reconciliation_tick(
-            now=now,
-            date_start=ds,
-            date_end=de,
-            recon_day=recon_day,
-            lookback_days=lookback_days,
-        )
-        return
-
-    granularity = max(
-        1, int(os.getenv("DISCURSOS_DISPATCH_GRANULARITY_MIN", "20"))
-    )
-    lookback_min = max(
-        granularity,
-        int(
-            os.getenv(
-                "DISCURSOS_LOOKBACK_MINUTES",
-                str(DEFAULT_MICROBATCH_LOOKBACK_MINUTES),
-            )
-        ),
-    )
-    anchor = _round_minute_down(now, granularity)
-    pipeline_run_id = discursos_microbatch_run_id(
-        anchor.strftime("%Y-%m-%dT%H:%M")
-    )
-    window_end = now
-    window_start = window_end - timedelta(minutes=lookback_min)
+    now = now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
+    pipeline_run_id = discursos_daily_run_id(now.strftime("%Y-%m-%d"))
+    date_start, date_end, window_start, window_end = _daily_api_date_window(now=now)
 
     conn = os.environ["AzureWebJobsStorage"]
     control_table = os.getenv("INGESTION_CONTROL_TABLE", "IngestionControlApi2026")
@@ -118,7 +66,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     max_messages_per_tick = max(
         1, int(os.getenv("DISCURSOS_MAX_MESSAGES_PER_TICK", "1000"))
     )
-    max_list_pages = int(os.getenv("DISCURSOS_MAX_LIST_PAGES", "20"))
+    max_list_pages = max(1, int(os.getenv("DISCURSOS_MAX_LIST_PAGES", "20")))
 
     registry = GenericRunRegistry.from_connection_string(
         conn,
@@ -136,23 +84,23 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     if run_status == "COMPLETED":
         log_structured(
             logger,
-            "info",
-            "Discursos dispatch skipped: run already COMPLETED.",
+            "debug",
+            "Discursos daily dispatch skipped: run already COMPLETED.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
         )
         return
 
     acquired, lock_token = registry.try_acquire_dispatcher_lock(
-        mode="microbatch",
+        mode="daily",
         pipeline_run_id=pipeline_run_id,
         ttl_minutes=lock_ttl,
     )
     if not acquired:
         log_structured(
             logger,
-            "info",
-            "Discursos dispatch skipped: dispatcher lock held.",
+            "debug",
+            "Discursos daily dispatch skipped: dispatcher lock held.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
         )
@@ -161,10 +109,12 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     started_at = str(run.get("started_at") or now.isoformat())
     enqueued_now = 0
     skipped_already_queued = 0
-    skipped_already_success = 0
-    list_pages_written = 0
+    skipped_same_list_hash = 0
+    list_lines: list[str] = []
     list_records_collected = 0
+    logical_pages = 0
     detected_ids: set[str] = set()
+    fingerprints_by_id: dict[str, str] = {}
 
     api = CamaraApiClient(base_url=domain.api_base_url)
     raw_writer = AdlsRawWriter(account_name=raw_account)
@@ -173,15 +123,15 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         f"{DISCURSOS_BASE_PREFIX}/deputies_snapshot/"
         f"pipeline_run_id={pipeline_run_id}/execution_id={pipeline_run_id}"
     )
-    date_start = _fmt_window_param(window_start)
-    date_end = _fmt_window_param(window_end)
+    jsonl_path = f"{deputies_dir}/deputies_list.jsonl"
+    bkf = ("id",)
 
     try:
         if not run:
             registry.upsert_run(
                 {
                     "pipeline_run_id": pipeline_run_id,
-                    "run_type": "microbatch",
+                    "run_type": "daily",
                     "status": "STARTED",
                     "domain": domain.name,
                     "window_start_utc": window_start.isoformat(),
@@ -199,12 +149,14 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     "deputies_snapshot_pipeline_run_id": pipeline_run_id,
                     "hash_strategy": domain.hash_strategy,
                     "audit_fields_applied": json.dumps(list(domain.audit_fields)),
+                    "api_date_start": date_start,
+                    "api_date_end": date_end,
                 }
             )
 
         running_meta = build_discursos_dispatcher_run_metadata(
             pipeline_run_id=pipeline_run_id,
-            mode="microbatch",
+            mode="daily",
             status="RUNNING",
             started_at_utc=started_at,
             finished_at_utc=None,
@@ -226,6 +178,11 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             source_system=domain.source_system,
             hash_strategy=domain.hash_strategy,
             audit_fields_applied=domain.audit_fields,
+            manifest_extras={
+                "api_date_start": date_start,
+                "api_date_end": date_end,
+                "deputies_list_jsonl": jsonl_path,
+            },
         )
         persist_discursos_run_metadata(
             raw_writer,
@@ -234,15 +191,12 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             write_success_marker_now=False,
         )
 
-        # 1) Self-contained deputies snapshot for fanout.
         page = 1
         while page <= max_list_pages:
-            payload, _http = api.list_endpoint_page(
-                "/deputados", page=page, itens=100
-            )
+            payload, _http = api.list_endpoint_page("/deputados", page=page, itens=100)
             dados = payload.get("dados") or []
             list_records_collected += len(dados)
-            raw_path = f"{deputies_dir}/page_{page}.json"
+            logical_pages += 1
             enriched = enrich_generic_page_payload(
                 payload,
                 pipeline_run_id=pipeline_run_id,
@@ -251,19 +205,24 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 entity="deputies_snapshot",
                 endpoint="deputies_snapshot",
                 api_path="/deputados",
-                raw_path=raw_path,
+                raw_path=f"{deputies_dir}/#jsonl_page_{page}",
                 page=page,
-                business_key_fields=("id",),
+                business_key_fields=bkf,
                 source_system=domain.source_system,
                 api_base_url=domain.api_base_url,
             )
-            raw_writer.write_json(raw_path, enriched)
-            list_pages_written += 1
+            list_lines.append(json.dumps(enriched, ensure_ascii=True))
             for item in dados:
-                if isinstance(item, dict):
-                    did = item.get("id")
-                    if did is not None:
-                        detected_ids.add(str(did))
+                if isinstance(item, dict) and item.get("id") is not None:
+                    did = str(item.get("id"))
+                    detected_ids.add(did)
+                    _uid, hsh = list_item_uid_hash(
+                        domain,
+                        endpoint_name="deputies_snapshot",
+                        business_key_fields=bkf,
+                        item=item,
+                    )
+                    fingerprints_by_id[did] = hsh
             links = payload.get("links") or []
             has_next = any(
                 isinstance(li, dict) and li.get("rel") == "next" for li in links
@@ -272,39 +231,49 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 break
             page += 1
 
-        # 2) Fanout: enqueue per deputado.
+        list_artifact_written = False
+        if list_lines:
+            raw_writer.write_text(jsonl_path, "\n".join(list_lines) + "\n")
+            list_artifact_written = True
+
         queue_client = prepare_queue_client_for_dispatch(
             queue_name,
             logger=logger,
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
         )
+
         for did in sorted(detected_ids):
+            list_hash = fingerprints_by_id.get(did) or ""
             if enqueued_now >= max_messages_per_tick:
                 break
             row = _state_row_key(did)
             state = parts.get_partition(row) or {}
             cur_pid = str(state.get("current_pipeline_run_id", "") or "")
             cur_status = str(state.get("status", "")).upper()
-            if cur_pid == pipeline_run_id and cur_status == "SUCCESS":
-                skipped_already_success += 1
-                continue
             if cur_pid == pipeline_run_id and cur_status in ("QUEUED", "RUNNING"):
                 skipped_already_queued += 1
                 continue
+            if cur_status == "SUCCESS" and list_hash and str(
+                state.get("last_list_item_hash") or ""
+            ) == list_hash:
+                skipped_same_list_hash += 1
+                continue
+
             execution_id = str(uuid.uuid4())
             dispatched_at = datetime.now(UTC).isoformat()
             wm = DomainWorkMessage(
                 domain=domain.name,
                 endpoint=discursos_endpoint.name,
                 pipeline_run_id=pipeline_run_id,
-                run_type="microbatch",
+                run_type="daily",
                 payload={
                     "deputado_id": did,
                     "window_start_utc": window_start.isoformat(),
                     "window_end_utc": window_end.isoformat(),
                     "date_start": date_start,
                     "date_end": date_end,
+                    "list_item_hash": list_hash,
                 },
                 execution_id=execution_id,
                 dispatched_at=dispatched_at,
@@ -332,7 +301,6 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             parts.upsert_partition(row, patch)
             enqueued_now += 1
 
-        # 3) Reconcile run counters.
         pc = parts.count_statuses_by_run(pipeline_run_id)
         total_seen = (
             pc["queued"]
@@ -344,14 +312,43 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             + pc["stale"]
             + pc["other"]
         )
-        total_expected = max(len(detected_ids), total_seen)
-        enqueue_phase_complete = (
-            list_pages_written > 0
-            and enqueued_now == 0
-            and skipped_already_queued == 0
-            and total_seen >= len(detected_ids)
+        sub_count = 1
+        total_expected = max(len(detected_ids) * sub_count, total_seen)
+        fanout_target = len(detected_ids) * sub_count
+        fanout_decisions = (
+            enqueued_now + skipped_already_queued + skipped_same_list_hash
         )
+        hit_cap = enqueued_now >= max_messages_per_tick
+
+        if not detected_ids:
+            enqueue_phase_complete = list_artifact_written
+        else:
+            enqueue_phase_complete = (
+                list_artifact_written
+                and not hit_cap
+                and fanout_decisions >= fanout_target
+                and enqueued_now == 0
+                and skipped_already_queued == 0
+            )
+
+        all_subtasks_skipped_hash = (
+            enqueue_phase_complete
+            and fanout_target > 0
+            and skipped_same_list_hash >= fanout_target
+        )
+
         if (
+            enqueue_phase_complete
+            and total_expected == 0
+            and pc["failed"] == 0
+            and pc["poison"] == 0
+            and pc["running"] == 0
+            and pc["queued"] == 0
+            and pc["pending"] == 0
+        ) or all_subtasks_skipped_hash:
+            run_status_final = "COMPLETED"
+            finished_at_utc = datetime.now(UTC).isoformat()
+        elif (
             enqueue_phase_complete
             and total_expected > 0
             and pc["success"] >= total_expected
@@ -385,16 +382,18 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 "total_tasks_running": pc["running"],
                 "deputies_snapshot_path": deputies_dir,
                 "deputies_snapshot_pipeline_run_id": pipeline_run_id,
-                "list_pages_written": list_pages_written,
+                "list_pages_written": logical_pages,
                 "list_records_collected": list_records_collected,
                 "window_start_utc": window_start.isoformat(),
                 "window_end_utc": window_end.isoformat(),
             }
         )
 
+        raw_files = 1 if list_artifact_written else 0
+
         agg_meta = build_discursos_dispatcher_run_metadata(
             pipeline_run_id=pipeline_run_id,
-            mode="microbatch",
+            mode="daily",
             status=run_status_final,
             started_at_utc=started_at,
             finished_at_utc=finished_at_utc,
@@ -416,8 +415,14 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             source_system=domain.source_system,
             hash_strategy=domain.hash_strategy,
             audit_fields_applied=domain.audit_fields,
-            total_raw_files_written=list_pages_written,
+            total_raw_files_written=raw_files,
             total_records_collected=list_records_collected,
+            manifest_extras={
+                "api_date_start": date_start,
+                "api_date_end": date_end,
+                "deputies_list_jsonl": jsonl_path if list_lines else "",
+                "records_skipped_same_hash": skipped_same_list_hash,
+            },
         )
         persist_discursos_run_metadata(
             raw_writer,
@@ -429,31 +434,22 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         log_structured(
             logger,
             "info",
-            "Discursos dispatch tick finished.",
-            domain=domain.name,
+            "discursos_daily completed",
             pipeline_run_id=pipeline_run_id,
-            window_start_utc=window_start.isoformat(),
-            window_end_utc=window_end.isoformat(),
-            list_pages_written=list_pages_written,
-            list_records_collected=list_records_collected,
-            total_detected=len(detected_ids),
-            total_expected=total_expected,
-            enqueued_now=enqueued_now,
-            skipped_already_queued=skipped_already_queued,
-            skipped_already_success=skipped_already_success,
-            total_tasks_success=pc["success"],
-            total_tasks_failed=pc["failed"],
-            total_tasks_running=pc["running"],
-            total_tasks_queued=pc["queued"],
+            records_seen=list_records_collected,
+            deputados_distinct=len(detected_ids),
+            messages_enqueued=enqueued_now,
+            messages_skipped_hash=skipped_same_list_hash,
+            messages_skipped_queued=skipped_already_queued,
+            list_jsonl_lines=len(list_lines),
             run_status_final=run_status_final,
-            enqueue_phase_complete=enqueue_phase_complete,
         )
     except Exception as exc:
         failed_at = datetime.now(UTC).isoformat()
         log_structured(
             logger,
             "error",
-            "Discursos dispatcher failed.",
+            "Discursos daily dispatcher failed.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
             error=str(exc)[:500],
@@ -474,7 +470,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         try:
             failed_meta = build_discursos_dispatcher_run_metadata(
                 pipeline_run_id=pipeline_run_id,
-                mode="microbatch",
+                mode="daily",
                 status="FAILED",
                 started_at_utc=started_at,
                 finished_at_utc=None,
@@ -498,7 +494,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 source_system=domain.source_system,
                 hash_strategy=domain.hash_strategy,
                 audit_fields_applied=domain.audit_fields,
-                total_raw_files_written=list_pages_written,
+                total_raw_files_written=0,
                 total_records_collected=list_records_collected,
             )
             persist_discursos_run_metadata(
@@ -512,4 +508,3 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         raise
     finally:
         registry.release_dispatcher_lock(lock_token)
-        _ = raw_account

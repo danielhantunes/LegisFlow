@@ -48,6 +48,9 @@ SCHEDULE_VOTACOES_MICROBATCH = "0 */10 * * * *"
 # Eventos: daily list 07:15 UTC; weekly reconciliation Sunday 08:15 UTC.
 SCHEDULE_EVENTOS_DAILY = "0 15 7 * * *"
 SCHEDULE_EVENTOS_RECONCILIATION = "0 15 8 * * 0"
+# Discursos: daily deputies list + fanout; weekly reconciliation (prev month → today).
+SCHEDULE_DISCURSOS_DAILY = "0 25 7 * * *"
+SCHEDULE_DISCURSOS_RECONCILIATION = "0 25 8 * * 0"
 
 # Default microbatch lookback (votacoes): how far back the dispatcher scans on
 # every tick (overlap with the previous tick provides safety net for late
@@ -486,19 +489,20 @@ INSTITUCIONAL_DOMAIN = DomainSpec(
 )
 
 
-# --- Discursos (microbatch + fanout por deputado) ----------------------------
-# Dispatcher enfileira uma tarefa por deputado dentro de uma janela de tempo
-# (lookback configurável). O worker consulta /deputados/{id}/discursos com
-# dataInicio/dataFim cobrindo a janela e persiste as páginas com auditoria.
+# --- Discursos (daily + weekly reconciliation; fanout por deputado) ----------
+# Daily timer lists ``/deputados`` (JSONL snapshot + hash-aware fanout).
+# Weekly reconciliation lists deputies with resumable pages and the same
+# worker contract. Legacy ``discursos_microbatch_*`` ids remain valid for reset.
 DISCURSOS_DOMAIN = DomainSpec(
     name="discursos",
     description=(
-        "Discursos: fanout por deputado dentro de uma janela de tempo "
-        "(microbatch sobre dataInicio/dataFim de /deputados/{id}/discursos)."
+        "Discursos: daily deputies list + hash-aware fanout; weekly reconciliation "
+        "over /deputados/{id}/discursos with calendar date filters."
     ),
     pipeline_run_id_prefixes=(
-        "discursos_microbatch_",
+        "discursos_daily_",
         "discursos_reconciliation_",
+        "discursos_microbatch_",
     ),
     queue_work="discursos-api-work",
     queue_poison="discursos-api-work-poison",
@@ -506,7 +510,7 @@ DISCURSOS_DOMAIN = DomainSpec(
     runs_partition_key="_runs_discursos",
     locks_partition_key="_locks_discursos",
     lock_row_key="discursos_dispatcher_lock",
-    schedule_cron=SCHEDULE_EVERY_20_MIN,
+    schedule_cron=SCHEDULE_DISCURSOS_DAILY,
     endpoints=(
         EndpointSpec(
             name="deputado_discursos",
@@ -682,3 +686,11 @@ def discursos_reconciliation_run_id(reference_date: str) -> str:
     if len(compact) != 8 or not compact.isdigit():
         raise ValueError("reference_date must be YYYY-MM-DD")
     return f"discursos_reconciliation_{compact}"
+
+
+def discursos_daily_run_id(reference_date: str) -> str:
+    """``discursos_daily_YYYYMMDD`` — one canonical run id per UTC calendar day."""
+    compact = (reference_date or "").replace("-", "")
+    if len(compact) != 8 or not compact.isdigit():
+        raise ValueError("reference_date must be YYYY-MM-DD")
+    return f"discursos_daily_{compact}"

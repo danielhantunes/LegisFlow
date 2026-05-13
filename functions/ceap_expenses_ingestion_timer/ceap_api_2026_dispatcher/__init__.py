@@ -250,7 +250,7 @@ def _reconcile_run_manifest_from_table(
         )
         log_structured(
             logger,
-            "info",
+            "debug",
             "CEAP run manifest reconciled from IngestionState.",
             pipeline_run_id=pipeline_run_id,
             mode=mode,
@@ -385,7 +385,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     if not month_list:
         log_structured(
             logger,
-            "info",
+            "debug",
             "CEAP dispatch: no months in window.",
             mode=mode,
             pipeline_run_id=pipeline_run_id,
@@ -435,7 +435,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     if run and str(run.get("status", "")).upper() == "COMPLETED":
         log_structured(
             logger,
-            "info",
+            "debug",
             "CEAP dispatch skipped: run already COMPLETED.",
             mode=mode,
             pipeline_run_id=pipeline_run_id,
@@ -446,7 +446,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     if run and bool(run.get("enqueue_phase_complete")):
         log_structured(
             logger,
-            "info",
+            "debug",
             "CEAP dispatch skipped: enqueue phase already complete for this run.",
             mode=mode,
             pipeline_run_id=pipeline_run_id,
@@ -460,7 +460,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     if not acquired:
         log_structured(
             logger,
-            "info",
+            "debug",
             "CEAP dispatch skipped: dispatcher lock held.",
             mode=mode,
             pipeline_run_id=pipeline_run_id,
@@ -481,7 +481,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     try:
         log_structured(
             logger,
-            "info",
+            "debug",
             "[BEFORE_RUN_REFRESH]",
             pipeline_run_id=pipeline_run_id,
             mode=mode,
@@ -489,7 +489,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         run = registry.get_run(pipeline_run_id)
         log_structured(
             logger,
-            "info",
+            "debug",
             "[AFTER_RUN_REFRESH]",
             pipeline_run_id=pipeline_run_id,
             mode=mode,
@@ -504,7 +504,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         if not run:
             log_structured(
                 logger,
-                "info",
+                "debug",
                 "[BEFORE_FINAL_UPSERT]",
                 pipeline_run_id=pipeline_run_id,
                 mode=mode,
@@ -538,7 +538,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             )
             log_structured(
                 logger,
-                "info",
+                "debug",
                 "[AFTER_FINAL_UPSERT]",
                 pipeline_run_id=pipeline_run_id,
                 mode=mode,
@@ -626,7 +626,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 )
                 log_structured(
                     logger,
-                    "info",
+                    "debug",
                     "Reusing today's deputies snapshot (no /deputados call).",
                     pipeline_run_id=pipeline_run_id,
                     mode=mode,
@@ -722,7 +722,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
 
             log_structured(
                 logger,
-                "info",
+                "debug",
                 "Creating new deputies snapshot (calling /deputados).",
                 pipeline_run_id=pipeline_run_id,
                 mode=mode,
@@ -751,7 +751,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 )
                 log_structured(
                     logger,
-                    "info",
+                    "debug",
                     "Deputies snapshot metadata persisted (RUNNING).",
                     pipeline_run_id=pipeline_run_id,
                     reference_date=reference_date_str,
@@ -780,7 +780,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     if not dados:
                         log_structured(
                             logger,
-                            "info",
+                            "debug",
                             "Dispatcher reached end of deputy list (empty page).",
                             pipeline_run_id=pipeline_run_id,
                             http_status=http_status,
@@ -808,7 +808,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     collected.extend([d for d in dados if isinstance(d, dict) and "id" in d])
                     log_structured(
                         logger,
-                        "info",
+                        "debug",
                         "Deputies page persisted in raw.",
                         mode=mode,
                         pipeline_run_id=pipeline_run_id,
@@ -928,7 +928,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
 
                 log_structured(
                     logger,
-                    "info",
+                    "debug",
                     "Deputies snapshot collection finished.",
                     pipeline_run_id=pipeline_run_id,
                     mode=mode,
@@ -1063,7 +1063,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 )
                 log_structured(
                     logger,
-                    "info",
+                    "debug",
                     "CEAP run manifest initial persisted in raw.",
                     pipeline_run_id=pipeline_run_id,
                     manifest_path=mp_initial,
@@ -1104,7 +1104,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 )
                 log_structured(
                     logger,
-                    "info",
+                    "debug",
                     "Dispatcher walked through whole deputies list.",
                     pipeline_run_id=pipeline_run_id,
                     pagina=pagina,
@@ -1381,7 +1381,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
 
         log_structured(
             logger,
-            "info",
+            "debug",
             "[AFTER_ENQUEUE_LOOP]",
             pipeline_run_id=pipeline_run_id,
             mode=mode,
@@ -1407,7 +1407,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
 
         log_structured(
             logger,
-            "info",
+            "debug",
             "[BEFORE_RUN_REFRESH]",
             pipeline_run_id=pipeline_run_id,
             mode=mode,
@@ -1416,7 +1416,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         run_refresh = registry.get_run(pipeline_run_id) or {}
         log_structured(
             logger,
-            "info",
+            "debug",
             "[AFTER_RUN_REFRESH]",
             pipeline_run_id=pipeline_run_id,
             mode=mode,
@@ -1516,7 +1516,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
 
             log_structured(
                 logger,
-                "info",
+                "debug",
                 "[BEFORE_FINAL_UPSERT]",
                 pipeline_run_id=pipeline_run_id,
                 mode=mode,
@@ -1580,7 +1580,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             registry.upsert_run(upsert_payload)
             log_structured(
                 logger,
-                "info",
+                "debug",
                 "[AFTER_FINAL_UPSERT]",
                 pipeline_run_id=pipeline_run_id,
                 mode=mode,
@@ -1590,7 +1590,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         else:
             log_structured(
                 logger,
-                "info",
+                "debug",
                 "[BEFORE_FINAL_UPSERT]",
                 pipeline_run_id=pipeline_run_id,
                 mode=mode,
@@ -1626,7 +1626,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 )
             log_structured(
                 logger,
-                "info",
+                "debug",
                 "[AFTER_FINAL_UPSERT]",
                 pipeline_run_id=pipeline_run_id,
                 mode=mode,
@@ -1637,7 +1637,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
 
         log_structured(
             logger,
-            "info",
+            "debug",
             "[BEFORE_RUN_REFRESH]",
             pipeline_run_id=pipeline_run_id,
             mode=mode,
@@ -1646,7 +1646,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         run_done = registry.get_run(pipeline_run_id) or {}
         log_structured(
             logger,
-            "info",
+            "debug",
             "[AFTER_RUN_REFRESH]",
             pipeline_run_id=pipeline_run_id,
             mode=mode,
@@ -1817,7 +1817,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             )
             log_structured(
                 logger,
-                "info",
+                "debug",
                 "CEAP run manifest persisted in raw.",
                 pipeline_run_id=pipeline_run_id,
                 mode=mode,
@@ -1842,7 +1842,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
 
         log_structured(
             logger,
-            "info",
+            "debug",
             "CEAP dispatch tick finished.",
             mode=mode,
             pipeline_run_id=pipeline_run_id,
@@ -1887,7 +1887,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         )
         log_structured(
             logger,
-            "info",
+            "debug",
             "[DISPATCH_TICK_FINISHED]",
             pipeline_run_id=pipeline_run_id,
             mode=mode,
@@ -1932,7 +1932,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         try:
             log_structured(
                 logger,
-                "info",
+                "debug",
                 "[BEFORE_FINAL_UPSERT]",
                 pipeline_run_id=pipeline_run_id,
                 mode=mode,
@@ -2069,7 +2069,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 )
             log_structured(
                 logger,
-                "info",
+                "debug",
                 "[AFTER_FINAL_UPSERT]",
                 pipeline_run_id=pipeline_run_id,
                 mode=mode,
@@ -2089,7 +2089,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     finally:
         log_structured(
             logger,
-            "info",
+            "debug",
             "[BEFORE_RELEASE_LOCK]",
             pipeline_run_id=pipeline_run_id,
             mode=mode,
@@ -2097,7 +2097,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         registry.release_dispatcher_lock(lock_token)
         log_structured(
             logger,
-            "info",
+            "debug",
             "[AFTER_RELEASE_LOCK]",
             pipeline_run_id=pipeline_run_id,
             mode=mode,
@@ -2105,7 +2105,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         snap = registry.get_run(pipeline_run_id) or {}
         log_structured(
             logger,
-            "info",
+            "debug",
             "CEAP dispatcher lock released.",
             pipeline_run_id=pipeline_run_id,
             lock_released=True,

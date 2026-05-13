@@ -52,7 +52,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         return _json({"error": "Invalid JSON body."}, status=400)
 
     now = datetime.now(UTC)
-    recon_day = max(1, min(28, int(os.getenv("DISCURSOS_RECONCILIATION_DAY", "25"))))
     pipeline_run_id = discursos_reconciliation_run_id(now.strftime("%Y-%m-%d"))
 
     date_start = str(body.get("date_start", "") or "").strip()
@@ -119,17 +118,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             status=409,
         )
 
-    ds = datetime.fromisoformat(date_start).date()
-    de = datetime.fromisoformat(date_end).date()
-    lookback_meta = max(1, (de - ds).days + 1)
-
     try:
         execute_discursos_reconciliation_tick(
             now=now,
             date_start=date_start,
             date_end=date_end,
-            recon_day=recon_day,
-            lookback_days=lookback_meta,
         )
     except Exception as exc:  # noqa: BLE001
         log_structured(

@@ -81,8 +81,8 @@ variable "max_retry_attempts" {
 
 variable "log_level" {
   type        = string
-  description = "Python logging level for LegisFlow loggers (e.g. INFO, WARNING). DEBUG enables verbose queue send traces."
-  default     = "INFO"
+  description = "Python logging level for LegisFlow loggers (stdout → App Insights). WARNING reduces trace volume; use INFO/DEBUG temporarily when diagnosing."
+  default     = "WARNING"
 }
 
 # ---------------------------------------------------------------------------
@@ -98,8 +98,8 @@ variable "reference_snapshot_queue_name" {
 
 variable "reference_snapshot_dispatch_schedule" {
   type        = string
-  description = "CRON for the reference snapshot dispatcher (every 20 minutes during validation)."
-  default     = "0 */20 * * * *"
+  description = "CRON for the reference snapshot dispatcher (default once daily 06:00 UTC)."
+  default     = "0 0 6 * * *"
 }
 
 variable "reference_timezone" {
@@ -392,22 +392,22 @@ variable "discursos_queue_name" {
   default     = "discursos-api-work"
 }
 
-variable "discursos_dispatch_schedule" {
+variable "discursos_daily_dispatch_schedule" {
   type        = string
-  description = "CRON for the discursos dispatcher (every 20 minutes during validation)."
-  default     = "0 */20 * * * *"
+  description = "Timer CRON for discursos daily deputies list + fanout (UTC)."
+  default     = "0 25 7 * * *"
 }
 
-variable "discursos_dispatch_granularity_min" {
-  type        = number
-  description = "Minute granularity used to derive the discursos microbatch pipeline_run_id."
-  default     = 20
+variable "discursos_reconciliation_dispatch_schedule" {
+  type        = string
+  description = "Timer CRON for discursos weekly reconciliation (UTC; default Sunday 08:25)."
+  default     = "0 25 8 * * 0"
 }
 
-variable "discursos_lookback_minutes" {
+variable "discursos_daily_lookback_days" {
   type        = number
-  description = "How far back the discursos worker scans /deputados/{id}/discursos on every tick."
-  default     = 120
+  description = "Inclusive calendar-day span (API dateInicio/dataFim) for daily discursos worker messages."
+  default     = 7
 }
 
 variable "discursos_lock_ttl_minutes" {
@@ -428,16 +428,10 @@ variable "discursos_max_list_pages" {
   default     = 20
 }
 
-variable "discursos_reconciliation_day" {
+variable "discursos_recon_max_list_pages" {
   type        = number
-  description = "UTC calendar day each month when discursos timer runs reconciliation instead of microbatch."
-  default     = 25
-}
-
-variable "discursos_reconciliation_lookback_days" {
-  type        = number
-  description = "Inclusive day span for discursos monthly reconciliation (API dateInicio/dataFim on worker messages)."
-  default     = 90
+  description = "Upper bound on /deputados pages during discursos reconciliation listing (resume across ticks)."
+  default     = 80
 }
 
 variable "discursos_recon_max_pages_per_tick" {

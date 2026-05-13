@@ -98,14 +98,32 @@ def main(msg: func.QueueMessage) -> None:
 
     state_row = _state_row_key(deputado_id)
     state_now = parts.get_partition(state_row) or {}
+    list_item_hash = str(payload.get("list_item_hash") or "").strip()
+    cur_status = str(state_now.get("status", "")).upper()
+    if (
+        list_item_hash
+        and str(state_now.get("last_list_item_hash") or "") == list_item_hash
+        and cur_status == "SUCCESS"
+    ):
+        log_structured(
+            logger,
+            "debug",
+            "Discursos worker skipped: SUCCESS with same list_item_hash.",
+            domain=domain.name,
+            deputado_id=deputado_id,
+            pipeline_run_id=wm.pipeline_run_id,
+            dequeue_count=dequeue_count,
+        )
+        return
+
     same_run = (
         str(state_now.get("current_pipeline_run_id", "") or "")
         == wm.pipeline_run_id
     )
-    if same_run and str(state_now.get("status", "")).upper() == "SUCCESS":
+    if same_run and cur_status == "SUCCESS":
         log_structured(
             logger,
-            "info",
+            "debug",
             "Discursos worker skipped: already SUCCESS for this run.",
             domain=domain.name,
             deputado_id=deputado_id,
@@ -186,21 +204,21 @@ def main(msg: func.QueueMessage) -> None:
 
     finished = datetime.now(UTC).isoformat()
     if result.final_status == "COMPLETED":
-        parts.upsert_partition(
-            state_row,
-            {
-                "endpoint": endpoint.name,
-                "deputado_id": deputado_id,
-                "status": "SUCCESS",
-                "current_pipeline_run_id": wm.pipeline_run_id,
-                "last_finished_at": finished,
-                "last_success_at": finished,
-                "record_count": result.record_count,
-                "pages_written": result.pages_written,
-                "raw_path": result.last_raw_path,
-                "last_error": "",
-            },
-        )
+        success_patch: dict[str, object] = {
+            "endpoint": endpoint.name,
+            "deputado_id": deputado_id,
+            "status": "SUCCESS",
+            "current_pipeline_run_id": wm.pipeline_run_id,
+            "last_finished_at": finished,
+            "last_success_at": finished,
+            "record_count": result.record_count,
+            "pages_written": result.pages_written,
+            "raw_path": result.last_raw_path,
+            "last_error": "",
+        }
+        if list_item_hash:
+            success_patch["last_list_item_hash"] = list_item_hash
+        parts.upsert_partition(state_row, success_patch)
         registry.merge_run_counters(wm.pipeline_run_id, success_delta=1)
     else:
         parts.upsert_partition(
@@ -222,7 +240,7 @@ def main(msg: func.QueueMessage) -> None:
 
     log_structured(
         logger,
-        "info",
+        "debug",
         "Discursos worker finished.",
         domain=domain.name,
         deputado_id=deputado_id,

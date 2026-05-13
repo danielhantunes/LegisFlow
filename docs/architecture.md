@@ -241,7 +241,7 @@ MVP intentionally excludes Databricks asset deployment workflow and future funct
   - **proposicoes:** `proposicoes_daily_dispatcher`, `proposicoes_reconciliation_dispatcher`, `proposicoes_worker`, `proposicoes_poison_handler`, `fn_replay_proposicoes_failed_messages`, `fn_reset_proposicoes_pipeline_run`
   - **eventos:** `eventos_daily_dispatcher`, `eventos_reconciliation_dispatcher`, `eventos_worker`, `eventos_poison_handler`, `fn_replay_eventos_failed_messages`, `fn_reset_eventos_pipeline_run`
   - **institucional:** `institucional_dispatcher`, `institucional_worker`, `institucional_poison_handler`, `fn_replay_institucional_failed_messages`, `fn_reset_institucional_pipeline_run`
-  - **discursos:** `discursos_dispatcher`, `discursos_worker`, `discursos_poison_handler`, `fn_replay_discursos_failed_messages`, `fn_reset_discursos_pipeline_run`
+  - **discursos:** `discursos_daily_dispatcher`, `discursos_reconciliation_dispatcher`, `discursos_worker`, `discursos_poison_handler`, `fn_replay_discursos_failed_messages`, `fn_reset_discursos_pipeline_run`
 
 Older roadmap names such as `legislative_events_ingestion_timer` / `voting_microbatch_timer` **do not** map 1:1 to folder names above; capability is covered by the **eventos** / **votacoes** domains instead.
 

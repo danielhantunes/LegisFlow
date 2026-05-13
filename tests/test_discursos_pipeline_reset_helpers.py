@@ -13,6 +13,10 @@ from shared.discursos_pipeline_reset_helpers import (
 )
 
 
+def test_daily_run_id_format_is_accepted() -> None:
+    assert is_allowed_discursos_pipeline_run_id("discursos_daily_20260511")
+
+
 def test_microbatch_run_id_format_is_accepted() -> None:
     assert is_allowed_discursos_pipeline_run_id("discursos_microbatch_202605112230")
 
@@ -38,8 +42,8 @@ def test_invalid_run_ids_are_rejected() -> None:
     assert not is_allowed_discursos_pipeline_run_id("discursos_microbatch_")
     assert not is_allowed_discursos_pipeline_run_id("discursos_microbatch_2026")
     assert not is_allowed_discursos_pipeline_run_id("discursos_other_20260511")
-    # Daily is NOT a valid mode for discursos.
-    assert not is_allowed_discursos_pipeline_run_id("discursos_daily_20260511")
+    assert not is_allowed_discursos_pipeline_run_id("discursos_daily_")
+    assert not is_allowed_discursos_pipeline_run_id("discursos_daily_2026")
 
 
 def test_safe_path_segment_replaces_unsafe_chars() -> None:

@@ -20,7 +20,7 @@ Cada domínio (exceto CEAP “clássico”) segue o padrão: **dispatcher (timer
 | **proposicoes** | `proposicoes_daily_dispatcher`, `proposicoes_reconciliation_dispatcher` | `proposicoes_worker` | `proposicoes_poison_handler` | `fn_replay_proposicoes_failed_messages` | `fn_reset_proposicoes_pipeline_run` |
 | **eventos** | `eventos_daily_dispatcher`, `eventos_reconciliation_dispatcher` | `eventos_worker` | `eventos_poison_handler` | `fn_replay_eventos_failed_messages` | `fn_reset_eventos_pipeline_run` |
 | **institucional** | `institucional_dispatcher` | `institucional_worker` | `institucional_poison_handler` | `fn_replay_institucional_failed_messages` | `fn_reset_institucional_pipeline_run` |
-| **discursos** | `discursos_dispatcher` | `discursos_worker` | `discursos_poison_handler` | `fn_replay_discursos_failed_messages` | `fn_reset_discursos_pipeline_run` |
+| **discursos** | `discursos_daily_dispatcher`, `discursos_reconciliation_dispatcher` | `discursos_worker` | `discursos_poison_handler` | `fn_replay_discursos_failed_messages` | `fn_reset_discursos_pipeline_run` |
 
 **Catálogo declarativo:** `shared/domain_catalog.py` regista `ceap`, `reference`, `votacoes`, `proposicoes`, `eventos`, `institucional`, `discursos` (filas, partition keys em tabelas, prefixos de `pipeline_run_id`, endpoints). O CEAP em produção continua a usar módulos dedicados (`ceap_*`); o catálogo para CEAP é em parte **descritivo** (comentário no ficheiro).
 

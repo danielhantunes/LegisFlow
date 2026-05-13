@@ -72,8 +72,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         return _json_response(
             {
                 "error": (
-                    "pipeline_run_id must match discursos_microbatch_YYYYMMDDHHMM "
-                    "or discursos_reconciliation_YYYYMMDD."
+                    "pipeline_run_id must match discursos_daily_YYYYMMDD, "
+                    "discursos_reconciliation_YYYYMMDD, or discursos_microbatch_YYYYMMDDHHMM."
                 )
             },
             status=400,

@@ -109,7 +109,7 @@ def execute_proposicoes_daily_tick(*, now: datetime) -> None:
     if run_status == "COMPLETED":
         log_structured(
             logger,
-            "info",
+            "debug",
             "Proposicoes daily dispatch skipped: run already COMPLETED.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
@@ -124,7 +124,7 @@ def execute_proposicoes_daily_tick(*, now: datetime) -> None:
     if not acquired:
         log_structured(
             logger,
-            "info",
+            "debug",
             "Proposicoes daily dispatch skipped: dispatcher lock held.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
@@ -502,18 +502,18 @@ def execute_proposicoes_daily_tick(*, now: datetime) -> None:
         log_structured(
             logger,
             "info",
-            "Proposicoes daily dispatch finished.",
+            "proposicoes_daily completed",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
             date_start=date_start,
             date_end=date_end,
-            list_pages_written=len(list_lines),
-            list_records_collected=list_records_collected,
-            total_detected=len(detected_ids),
-            total_expected=total_expected,
-            enqueued_now=enqueued_now,
-            skipped_same_list_hash=skipped_same_list_hash,
-            skipped_already_queued=skipped_already_queued,
+            records_seen=list_records_collected,
+            proposicoes_distinct=len(detected_ids),
+            messages_enqueued=enqueued_now,
+            messages_skipped_hash=skipped_same_list_hash,
+            messages_skipped_queued=skipped_already_queued,
+            list_jsonl_lines=len(list_lines),
+            total_tasks_expected=total_expected,
             run_status_final=run_status_final,
         )
     except Exception as exc:

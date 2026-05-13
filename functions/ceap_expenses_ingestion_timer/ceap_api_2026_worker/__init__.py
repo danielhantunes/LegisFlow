@@ -53,7 +53,7 @@ def main(msg: func.QueueMessage) -> None:
     if wm.ano != target_year:
         log_structured(
             logger,
-            "info",
+            "debug",
             "Skipped: ano does not match CEAP_TARGET_YEAR.",
             id_deputado=wm.id_deputado,
             ano=wm.ano,
@@ -69,7 +69,7 @@ def main(msg: func.QueueMessage) -> None:
     if wm.mes > max_m:
         log_structured(
             logger,
-            "info",
+            "debug",
             "Skipped: future month for target year.",
             id_deputado=wm.id_deputado,
             ano=wm.ano,
@@ -91,7 +91,7 @@ def main(msg: func.QueueMessage) -> None:
     ):
         log_structured(
             logger,
-            "info",
+            "debug",
             "Skipped: partition already SUCCESS for this pipeline_run_id.",
             id_deputado=wm.id_deputado,
             ano=wm.ano,
@@ -139,7 +139,7 @@ def main(msg: func.QueueMessage) -> None:
 
     log_structured(
         logger,
-        "info",
+        "debug",
         "Worker started.",
         id_deputado=wm.id_deputado,
         ano=wm.ano,
@@ -279,7 +279,7 @@ def main(msg: func.QueueMessage) -> None:
 
             log_structured(
                 logger,
-                "info",
+                "debug",
                 "Page persisted.",
                 id_deputado=wm.id_deputado,
                 ano=wm.ano,
@@ -321,7 +321,7 @@ def main(msg: func.QueueMessage) -> None:
         final_status = "success"
         log_structured(
             logger,
-            "info",
+            "debug",
             "Worker finished SUCCESS.",
             id_deputado=wm.id_deputado,
             ano=wm.ano,

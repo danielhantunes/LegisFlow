@@ -104,7 +104,7 @@ def main(msg: func.QueueMessage) -> None:
     ):
         log_structured(
             logger,
-            "info",
+            "debug",
             "Votacoes worker skipped: SUCCESS with unchanged list_record_hash.",
             domain=domain.name,
             endpoint=endpoint.name,
@@ -121,7 +121,7 @@ def main(msg: func.QueueMessage) -> None:
     if same_run and str(state_now.get("status", "")).upper() == "SUCCESS":
         log_structured(
             logger,
-            "info",
+            "debug",
             "Votacoes worker skipped: votação already SUCCESS for this run.",
             domain=domain.name,
             endpoint=endpoint.name,
@@ -238,7 +238,7 @@ def main(msg: func.QueueMessage) -> None:
 
     log_structured(
         logger,
-        "info",
+        "debug",
         "Votacoes worker finished.",
         domain=domain.name,
         endpoint=endpoint.name,

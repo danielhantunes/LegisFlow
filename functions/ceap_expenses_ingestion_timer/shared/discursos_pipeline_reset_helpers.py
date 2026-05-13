@@ -6,10 +6,11 @@ import base64
 import json
 import re
 
-# Microbatch: ``discursos_microbatch_YYYYMMDDHHMM`` (12 trailing digits)
+# Daily: ``discursos_daily_YYYYMMDD`` (8 trailing digits)
+# Microbatch (legacy): ``discursos_microbatch_YYYYMMDDHHMM`` (12 trailing digits)
 # Reconciliation: ``discursos_reconciliation_YYYYMMDD`` (8 trailing digits)
 _DISCURSOS_RUN_RE = re.compile(
-    r"^discursos_(microbatch_\d{12}|reconciliation_\d{8})$"
+    r"^discursos_(daily_\d{8}|microbatch_\d{12}|reconciliation_\d{8})$"
 )
 
 

@@ -1,11 +1,13 @@
-"""Monthly / manual reconciliation tick for discursos (deputados fanout + date window)."""
+"""Weekly / manual reconciliation tick for discursos (deputados fanout + date window)."""
 
 from __future__ import annotations
 
 import json
 import os
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+
+from .adls_writer import AdlsRawWriter
 from .api_client import CamaraApiClient
 from .discursos_raw_manifest import (
     DISCURSOS_BASE_PREFIX,
@@ -61,8 +63,8 @@ def execute_discursos_reconciliation_tick(
     now: datetime,
     date_start: str,
     date_end: str,
-    recon_day: int,
-    lookback_days: int,
+    recon_day: int | None = None,
+    lookback_days: int | None = None,
 ) -> None:
     def _as_utc(dt: datetime) -> datetime:
         if dt.tzinfo is None:
@@ -70,6 +72,14 @@ def execute_discursos_reconciliation_tick(
         return dt.astimezone(UTC)
 
     now_utc = _as_utc(now)
+    _recon_day = (
+        recon_day if recon_day is not None else int(now_utc.isoweekday())
+    )
+    _lookback_days = lookback_days
+    if _lookback_days is None:
+        _lookback_days = (
+            date.fromisoformat(date_end) - date.fromisoformat(date_start)
+        ).days + 1
     domain = DISCURSOS_DOMAIN
     pipeline_run_id = discursos_reconciliation_run_id(now_utc.strftime("%Y-%m-%d"))
     window_start = datetime.fromisoformat(f"{date_start}T00:00:00+00:00")
@@ -108,7 +118,7 @@ def execute_discursos_reconciliation_tick(
     if str(run_pre.get("status", "")).upper() == "COMPLETED":
         log_structured(
             logger,
-            "info",
+            "debug",
             "Discursos reconciliation skipped: run already COMPLETED.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
@@ -123,7 +133,7 @@ def execute_discursos_reconciliation_tick(
     if not acquired:
         log_structured(
             logger,
-            "info",
+            "debug",
             "Discursos reconciliation skipped: dispatcher lock held.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
@@ -135,7 +145,7 @@ def execute_discursos_reconciliation_tick(
         registry.release_dispatcher_lock(lock_token)
         log_structured(
             logger,
-            "info",
+            "debug",
             "Discursos reconciliation skipped after lock: COMPLETED.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
@@ -150,7 +160,8 @@ def execute_discursos_reconciliation_tick(
 
     enqueued_now = 0
     skipped_already_queued = 0
-    skipped_already_success = 0
+    skipped_same_list_hash = 0
+    skipped_same_run_success = 0
     list_pages_this_tick = 0
     list_recs_this_tick = 0
 
@@ -193,15 +204,15 @@ def execute_discursos_reconciliation_tick(
                     "recon_list_next_page": 1,
                     "date_start": date_start,
                     "date_end": date_end,
-                    "reconciliation_lookback_days": lookback_days,
+                    "reconciliation_lookback_days": _lookback_days,
                 }
             )
 
         extras_base = {
             "date_start": date_start,
             "date_end": date_end,
-            "reconciliation_day": recon_day,
-            "reconciliation_lookback_days": lookback_days,
+            "reconciliation_day": _recon_day,
+            "reconciliation_lookback_days": _lookback_days,
         }
         running_meta = build_discursos_dispatcher_run_metadata(
             pipeline_run_id=pipeline_run_id,
@@ -320,15 +331,22 @@ def execute_discursos_reconciliation_tick(
         for did in all_ids:
             if enqueued_now >= max_messages_per_tick:
                 break
+            fp = fingerprints.get(did) or {}
+            list_hash = str(fp.get("hash") or "")
             row = _state_row_key(did)
             state = parts.get_partition(row) or {}
             cur_pid = str(state.get("current_pipeline_run_id", "") or "")
             cur_status = str(state.get("status", "")).upper()
-            if cur_pid == pipeline_run_id and cur_status == "SUCCESS":
-                skipped_already_success += 1
-                continue
             if cur_pid == pipeline_run_id and cur_status in ("QUEUED", "RUNNING"):
                 skipped_already_queued += 1
+                continue
+            if cur_pid == pipeline_run_id and cur_status == "SUCCESS":
+                skipped_same_run_success += 1
+                continue
+            if cur_status == "SUCCESS" and list_hash and str(
+                state.get("last_list_item_hash") or ""
+            ) == list_hash:
+                skipped_same_list_hash += 1
                 continue
             execution_id = str(uuid.uuid4())
             dispatched_at = datetime.now(UTC).isoformat()
@@ -343,6 +361,7 @@ def execute_discursos_reconciliation_tick(
                     "window_end_utc": window_end.isoformat(),
                     "date_start": date_start,
                     "date_end": date_end,
+                    "list_item_hash": list_hash,
                 },
                 execution_id=execution_id,
                 dispatched_at=dispatched_at,
@@ -384,7 +403,16 @@ def execute_discursos_reconciliation_tick(
             + pc["other"]
         )
         n_ids = len(all_ids)
-        total_expected = max(n_ids, total_seen)
+        sub_count = 1
+        total_expected = max(n_ids * sub_count, total_seen)
+        fanout_target = n_ids * sub_count
+        fanout_decisions = (
+            enqueued_now
+            + skipped_already_queued
+            + skipped_same_list_hash
+            + skipped_same_run_success
+        )
+        hit_cap = enqueued_now >= max_messages_per_tick
 
         if not listing_complete:
             enqueue_phase_complete = False
@@ -392,10 +420,17 @@ def execute_discursos_reconciliation_tick(
             enqueue_phase_complete = True
         else:
             enqueue_phase_complete = (
-                enqueued_now == 0
+                not hit_cap
+                and fanout_decisions >= fanout_target
+                and enqueued_now == 0
                 and skipped_already_queued == 0
-                and total_seen >= n_ids
             )
+
+        all_subtasks_skipped_hash = (
+            enqueue_phase_complete
+            and fanout_target > 0
+            and (skipped_same_list_hash + skipped_same_run_success) >= fanout_target
+        )
 
         if (
             enqueue_phase_complete
@@ -405,7 +440,7 @@ def execute_discursos_reconciliation_tick(
             and pc["running"] == 0
             and pc["queued"] == 0
             and pc["pending"] == 0
-        ):
+        ) or all_subtasks_skipped_hash:
             run_status_final = "COMPLETED"
             finished_at_utc = datetime.now(UTC).isoformat()
         elif (
@@ -474,7 +509,11 @@ def execute_discursos_reconciliation_tick(
             audit_fields_applied=domain.audit_fields,
             total_raw_files_written=total_list_pages,
             total_records_collected=total_list_recs,
-            manifest_extras=extras_base,
+            manifest_extras={
+                **extras_base,
+                "records_skipped_same_hash": skipped_same_list_hash,
+                "records_skipped_same_run_success": skipped_same_run_success,
+            },
         )
         persist_discursos_run_metadata(
             raw_writer,
@@ -486,14 +525,18 @@ def execute_discursos_reconciliation_tick(
         log_structured(
             logger,
             "info",
-            "Discursos reconciliation tick finished.",
+            "discursos_reconciliation completed",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
             date_start=date_start,
             date_end=date_end,
             listing_complete=listing_complete,
-            total_detected=n_ids,
-            enqueued_now=enqueued_now,
+            records_seen=total_list_recs,
+            deputados_distinct=n_ids,
+            messages_enqueued=enqueued_now,
+            messages_skipped_hash=skipped_same_list_hash,
+            messages_skipped_same_run_success=skipped_same_run_success,
+            messages_skipped_queued=skipped_already_queued,
             run_status_final=run_status_final,
         )
     except Exception as exc:

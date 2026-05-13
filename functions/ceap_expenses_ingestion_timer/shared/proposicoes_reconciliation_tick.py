@@ -116,7 +116,7 @@ def execute_proposicoes_reconciliation_tick(
     if str(run_pre.get("status", "")).upper() == "COMPLETED":
         log_structured(
             logger,
-            "info",
+            "debug",
             "Proposicoes reconciliation skipped: run already COMPLETED.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
@@ -131,7 +131,7 @@ def execute_proposicoes_reconciliation_tick(
     if not acquired:
         log_structured(
             logger,
-            "info",
+            "debug",
             "Proposicoes reconciliation skipped: dispatcher lock held.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
@@ -143,7 +143,7 @@ def execute_proposicoes_reconciliation_tick(
         registry.release_dispatcher_lock(lock_token)
         log_structured(
             logger,
-            "info",
+            "debug",
             "Proposicoes reconciliation skipped after lock: COMPLETED.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
@@ -521,15 +521,17 @@ def execute_proposicoes_reconciliation_tick(
         log_structured(
             logger,
             "info",
-            "Proposicoes reconciliation tick finished.",
+            "proposicoes_reconciliation completed",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
             date_start=date_start,
             date_end=date_end,
             listing_complete=listing_complete,
-            total_detected=n_ids,
-            enqueued_now=enqueued_now,
-            skipped_same_list_hash=skipped_same_list_hash,
+            records_seen=total_list_recs,
+            proposicoes_distinct=n_ids,
+            messages_enqueued=enqueued_now,
+            messages_skipped_hash=skipped_same_list_hash,
+            messages_skipped_queued=skipped_already_queued,
             run_status_final=run_status_final,
         )
     except Exception as exc:

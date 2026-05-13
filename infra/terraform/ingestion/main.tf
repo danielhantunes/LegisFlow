@@ -262,16 +262,15 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "ENABLE_INSTITUCIONAL_RESET_FUNCTION" = var.enable_institucional_reset_function ? "true" : "false"
 
     # ----- Discursos domain -------------------------------------------------
-    "DISCURSOS_DISPATCH_SCHEDULE"        = var.discursos_dispatch_schedule
-    "DISCURSOS_DISPATCH_GRANULARITY_MIN" = tostring(var.discursos_dispatch_granularity_min)
-    "DISCURSOS_LOOKBACK_MINUTES"         = tostring(var.discursos_lookback_minutes)
+    "DISCURSOS_DAILY_DISPATCH_SCHEDULE"             = var.discursos_daily_dispatch_schedule
+    "DISCURSOS_RECONCILIATION_DISPATCH_SCHEDULE"    = var.discursos_reconciliation_dispatch_schedule
+    "DISCURSOS_DAILY_LOOKBACK_DAYS"                 = tostring(var.discursos_daily_lookback_days)
     "DISCURSOS_QUEUE_NAME"               = azurerm_storage_queue.discursos_work.name
     "DISCURSOS_POISON_QUEUE_NAME"        = azurerm_storage_queue.discursos_poison.name
     "DISCURSOS_LOCK_TTL_MINUTES"         = tostring(var.discursos_lock_ttl_minutes)
     "DISCURSOS_MAX_MESSAGES_PER_TICK"    = tostring(var.discursos_max_messages_per_tick)
     "DISCURSOS_MAX_LIST_PAGES"           = tostring(var.discursos_max_list_pages)
-    "DISCURSOS_RECONCILIATION_DAY"       = tostring(var.discursos_reconciliation_day)
-    "DISCURSOS_RECONCILIATION_LOOKBACK_DAYS" = tostring(var.discursos_reconciliation_lookback_days)
+    "DISCURSOS_RECON_MAX_LIST_PAGES"     = tostring(var.discursos_recon_max_list_pages)
     "DISCURSOS_RECON_MAX_PAGES_PER_TICK" = tostring(var.discursos_recon_max_pages_per_tick)
     "ENABLE_DISCURSOS_RESET_FUNCTION"    = var.enable_discursos_reset_function ? "true" : "false"
 
