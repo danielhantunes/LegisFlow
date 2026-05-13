@@ -198,6 +198,7 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "RAW_STORAGE_ACCOUNT_NAME" = var.lakehouse_storage_account_name
     "LAKEHOUSE_FILESYSTEM_NAME" = "lakehouse"
     "MAX_RETRY_ATTEMPTS"       = tostring(var.max_retry_attempts)
+    "LOG_LEVEL"                = var.log_level
 
     # ----- Reference snapshot domain ----------------------------------------
     "REFERENCE_SNAPSHOT_DISPATCH_SCHEDULE" = var.reference_snapshot_dispatch_schedule

@@ -79,6 +79,12 @@ variable "max_retry_attempts" {
   default     = 3
 }
 
+variable "log_level" {
+  type        = string
+  description = "Python logging level for LegisFlow loggers (e.g. INFO, WARNING). DEBUG enables verbose queue send traces."
+  default     = "INFO"
+}
+
 # ---------------------------------------------------------------------------
 # Reference snapshot domain (/partidos, /legislaturas, /deputados, /frentes,
 # /orgaos)

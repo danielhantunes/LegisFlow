@@ -55,7 +55,7 @@ def ensure_queue_exists(
 ) -> None:
     """Calls ``create_queue()`` once per logical setup; tolerates existing queue.
 
-    Logs ``event=queue_exists_checked`` after the ensure attempt.
+    Logs ``event=queue_exists_checked`` at DEBUG after the ensure attempt.
     """
     try:
         client.create_queue()
@@ -63,7 +63,7 @@ def ensure_queue_exists(
         pass
     log_structured(
         logger,
-        "info",
+        "debug",
         "Queue presence ensured (create idempotent).",
         event="queue_exists_checked",
         queue_name=queue_name,
@@ -82,14 +82,14 @@ def prepare_queue_client_for_dispatch(
     Intended for the CEAP dispatcher: call once before the enqueue loop, then reuse
     the returned client for every ``send_message``.
 
-    Logs ``event=queue_client_created`` after setup.
+    Logs ``event=queue_client_created`` at DEBUG after setup.
     """
     service = create_queue_service_client()
     client = service.get_queue_client(queue_name)
     ensure_queue_exists(client, logger=logger, queue_name=queue_name, **ctx)
     log_structured(
         logger,
-        "info",
+        "debug",
         "Queue client ready for dispatch.",
         event="queue_client_created",
         queue_name=queue_name,
@@ -116,7 +116,7 @@ def send_json_message_with_client(
     """
     log_structured(
         logger,
-        "info",
+        "debug",
         "Sending queue message.",
         event="message_enqueue_started",
         **ctx,
@@ -144,7 +144,7 @@ def send_json_message_with_client(
         raise
     log_structured(
         logger,
-        "info",
+        "debug",
         "Queue message sent.",
         event="message_enqueue_finished",
         **ctx,
