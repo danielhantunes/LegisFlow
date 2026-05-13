@@ -126,8 +126,8 @@ variable "votacoes_queue_name" {
 
 variable "votacoes_dispatch_schedule" {
   type        = string
-  description = "CRON for the votacoes dispatcher (every 10 minutes during validation)."
-  default     = "0 */10 * * * *"
+  description = "NCRONTAB (6-field) for votacoes dispatcher: every 10 minutes Mon–Fri UTC."
+  default     = "0 */10 * * * 1-5"
 }
 
 variable "votacoes_dispatch_granularity_min" {
@@ -158,6 +158,36 @@ variable "votacoes_max_list_pages" {
   type        = number
   description = "Maximum pages the votacoes dispatcher will fetch from /votacoes per tick."
   default     = 200
+}
+
+variable "votacoes_reconciliation_day" {
+  type        = number
+  description = "Calendar day (UTC) each month when the timer runs full reconciliation instead of microbatch."
+  default     = 25
+}
+
+variable "votacoes_microbatch_safety_window_hours" {
+  type        = number
+  description = "Approximate lookback window for microbatch /votacoes listing (hours)."
+  default     = 48
+}
+
+variable "votacoes_recon_max_pages_per_tick" {
+  type        = number
+  description = "Max /votacoes list pages per timer tick during monthly reconciliation resume."
+  default     = 40
+}
+
+variable "votacoes_target_year" {
+  type        = number
+  description = "TARGET_YEAR for votacoes monthly reconciliation window start (Jan 1 of this year)."
+  default     = 2026
+}
+
+variable "enable_manual_votacoes_reconciliation_function" {
+  type        = bool
+  description = "When true, sets ENABLE_MANUAL_RECONCILIATION_FUNCTIONS for fn_start_votacoes_reconciliation."
+  default     = false
 }
 
 variable "enable_votacoes_reset_function" {
@@ -360,6 +390,40 @@ variable "enable_discursos_reset_function" {
   type        = bool
   description = "Domain-specific feature flag for the discursos reset HTTP function."
   default     = false
+}
+
+# ---------------------------------------------------------------------------
+# Daily consolidated summary (raw/camara/_metadata/daily_summary/...)
+# ---------------------------------------------------------------------------
+
+variable "daily_summary_enabled" {
+  type        = bool
+  description = "When true, the daily_summary_builder timer writes daily_summary.json."
+  default     = true
+}
+
+variable "daily_summary_expected_domains" {
+  type        = string
+  description = "Comma-separated domain keys for the daily summary (supports reference_snapshot alias)."
+  default     = "ceap,reference_snapshot,votacoes,proposicoes,eventos,institucional,discursos"
+}
+
+variable "daily_summary_reference_timezone" {
+  type        = string
+  description = "IANA timezone used to derive reference_date for daily_summary paths."
+  default     = "America/Sao_Paulo"
+}
+
+variable "daily_summary_create_success_marker" {
+  type        = bool
+  description = "When true, write _SUCCESS under daily_summary when status is COMPLETED and no critical warnings."
+  default     = true
+}
+
+variable "daily_summary_cron" {
+  type        = string
+  description = "NCRONTAB for daily_summary_builder (default every 20 minutes during validation)."
+  default     = "0 */20 * * * *"
 }
 
 # ---------------------------------------------------------------------------

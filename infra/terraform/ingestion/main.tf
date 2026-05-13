@@ -216,7 +216,12 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "VOTACOES_LOCK_TTL_MINUTES"         = tostring(var.votacoes_lock_ttl_minutes)
     "VOTACOES_MAX_MESSAGES_PER_TICK"    = tostring(var.votacoes_max_messages_per_tick)
     "VOTACOES_MAX_LIST_PAGES"           = tostring(var.votacoes_max_list_pages)
+    "VOTACOES_RECONCILIATION_DAY"     = tostring(var.votacoes_reconciliation_day)
+    "VOTACOES_MICROBATCH_SAFETY_WINDOW_HOURS" = tostring(var.votacoes_microbatch_safety_window_hours)
+    "VOTACOES_RECON_MAX_PAGES_PER_TICK" = tostring(var.votacoes_recon_max_pages_per_tick)
+    "TARGET_YEAR"                       = tostring(var.votacoes_target_year)
     "ENABLE_VOTACOES_RESET_FUNCTION"    = var.enable_votacoes_reset_function ? "true" : "false"
+    "ENABLE_MANUAL_RECONCILIATION_FUNCTIONS" = var.enable_manual_votacoes_reconciliation_function ? "true" : "false"
 
     # ----- Proposicoes domain ----------------------------------------------
     "PROPOSICOES_DISPATCH_SCHEDULE"        = var.proposicoes_dispatch_schedule
@@ -259,6 +264,13 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "DISCURSOS_MAX_MESSAGES_PER_TICK"    = tostring(var.discursos_max_messages_per_tick)
     "DISCURSOS_MAX_LIST_PAGES"           = tostring(var.discursos_max_list_pages)
     "ENABLE_DISCURSOS_RESET_FUNCTION"    = var.enable_discursos_reset_function ? "true" : "false"
+
+    # ----- Daily consolidated summary -------------------------------------
+    "DAILY_SUMMARY_ENABLED"                 = var.daily_summary_enabled ? "true" : "false"
+    "DAILY_SUMMARY_EXPECTED_DOMAINS"        = var.daily_summary_expected_domains
+    "DAILY_SUMMARY_REFERENCE_TIMEZONE"      = var.daily_summary_reference_timezone
+    "DAILY_SUMMARY_CREATE_SUCCESS_MARKER"   = var.daily_summary_create_success_marker ? "true" : "false"
+    "DAILY_SUMMARY_CRON"                    = var.daily_summary_cron
 
     # ----- Global admin -----------------------------------------------------
     "ENABLE_RESET_FUNCTIONS" = var.enable_reset_functions ? "true" : "false"

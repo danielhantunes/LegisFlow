@@ -7,7 +7,7 @@
       "direction": "in",
       "name": "req",
       "methods": ["post"],
-      "route": "admin/reset/ceap-pipeline-run"
+      "route": "legisflow/reset/ceap-pipeline-run"
     },
     {
       "type": "http",

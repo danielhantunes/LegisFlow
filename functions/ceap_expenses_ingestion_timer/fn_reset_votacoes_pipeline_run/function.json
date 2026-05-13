@@ -7,7 +7,7 @@
       "direction": "in",
       "name": "req",
       "methods": ["post"],
-      "route": "admin/reset/votacoes-pipeline-run"
+      "route": "legisflow/reset/votacoes-pipeline-run"
     },
     {
       "type": "http",

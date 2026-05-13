@@ -29,10 +29,12 @@ METADATA_VERSION = "1.0"
 RunStatus = Literal[
     "STARTED",
     "RUNNING",
+    "QUEUING",
     "COMPLETED",
     "PARTIAL",
     "FAILED",
     "PARTIALLY_COMPLETED",
+    "NO_DATA",
 ]
 RunType = Literal[
     "snapshot", "daily", "reconciliation", "backfill", "manual_replay"
@@ -288,18 +290,33 @@ def validate_metadata_content(
             return False, "files_written!=total_pages"
     if profile.require_tasks_balanced:
         exp = _to_int(metadata.get("total_tasks_expected"))
-        if exp <= 0:
-            return False, "total_tasks_expected<=0"
-        if _to_int(metadata.get("total_tasks_success")) != exp:
-            return False, "success!=expected"
-        for k in (
-            "total_tasks_failed",
-            "total_tasks_pending",
-            "total_tasks_poison",
-            "total_tasks_running",
-        ):
-            if _to_int(metadata.get(k)) != 0:
-                return False, f"{k}!=0"
+        if exp < 0:
+            return False, "total_tasks_expected<0"
+        if exp == 0:
+            # Fanout runs with nothing to do: COMPLETED + all task counters at 0.
+            for k in (
+                "total_tasks_success",
+                "total_tasks_failed",
+                "total_tasks_pending",
+                "total_tasks_poison",
+                "total_tasks_running",
+                "total_tasks_queued",
+            ):
+                if _to_int(metadata.get(k)) != 0:
+                    return False, f"{k}!=0 when total_tasks_expected=0"
+        else:
+            if _to_int(metadata.get("total_tasks_success")) != exp:
+                return False, "success!=expected"
+            for k in (
+                "total_tasks_failed",
+                "total_tasks_pending",
+                "total_tasks_poison",
+                "total_tasks_running",
+            ):
+                if _to_int(metadata.get(k)) != 0:
+                    return False, f"{k}!=0"
+            if _to_int(metadata.get("total_tasks_queued")) != 0:
+                return False, "total_tasks_queued!=0"
     return True, ""
 
 

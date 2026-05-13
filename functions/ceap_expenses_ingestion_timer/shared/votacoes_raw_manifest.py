@@ -63,6 +63,34 @@ def votacoes_run_success_path(pipeline_run_id: str) -> str:
     return f"{votacoes_run_manifest_prefix(pipeline_run_id)}/_SUCCESS"
 
 
+def votacoes_discovered_fingerprints_path(pipeline_run_id: str) -> str:
+    """Cross-tick merge of ``/votacoes`` row fingerprints (reconciliation resume)."""
+    return f"{votacoes_run_manifest_prefix(pipeline_run_id)}/discovered_fingerprints.json"
+
+
+def load_votacoes_discovered_fingerprints(
+    adls: Any, pipeline_run_id: str
+) -> dict[str, dict[str, str]]:
+    path = votacoes_discovered_fingerprints_path(pipeline_run_id)
+    data = adls.read_json(path) or {}
+    out: dict[str, dict[str, str]] = {}
+    for vid, entry in (data.get("fingerprints") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        out[str(vid)] = {
+            "uid": str(entry.get("uid", "") or ""),
+            "hash": str(entry.get("hash", "") or ""),
+        }
+    return out
+
+
+def save_votacoes_discovered_fingerprints(
+    adls: Any, pipeline_run_id: str, fingerprints: dict[str, dict[str, str]]
+) -> None:
+    path = votacoes_discovered_fingerprints_path(pipeline_run_id)
+    adls.write_json(path, {"fingerprints": fingerprints})
+
+
 def build_votacoes_dispatcher_run_metadata(
     *,
     pipeline_run_id: str,
@@ -90,6 +118,7 @@ def build_votacoes_dispatcher_run_metadata(
     audit_fields_applied: tuple[str, ...] = DEFAULT_AUDIT_FIELDS,
     total_raw_files_written: int | None = None,
     total_records_collected: int | None = None,
+    manifest_extras: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate manifest for a votacoes run (similar to CEAP fanout shape)."""
     st_upper = str(status).upper()
@@ -100,14 +129,15 @@ def build_votacoes_dispatcher_run_metadata(
         in {
             "STARTED",
             "RUNNING",
+            "QUEUING",
             "COMPLETED",
             "PARTIAL",
             "FAILED",
             "PARTIALLY_COMPLETED",
+            "NO_DATA",
         }
         else "RUNNING",
     )
-    raw_dir = VOTACOES_BASE_PREFIX
     success_path = votacoes_run_success_path(pipeline_run_id)
     # Normalise mode → valid RunType literal expected by build_run_metadata.
     if mode == "reconciliation":
@@ -117,6 +147,7 @@ def build_votacoes_dispatcher_run_metadata(
     else:
         # microbatch / daily ticks fall under "daily" semantics.
         run_type_norm = "daily"
+    raw_dir = f"{VOTACOES_BASE_PREFIX}/list/pipeline_run_id={pipeline_run_id}"
     meta = build_run_metadata(
         source=source_system,
         domain="votacoes",
@@ -186,6 +217,10 @@ def build_votacoes_dispatcher_run_metadata(
         meta["error_type"] = error_type
     elif "error_type" in meta:
         del meta["error_type"]
+    if manifest_extras:
+        for k, v in manifest_extras.items():
+            if v is not None:
+                meta[k] = v
     return meta
 
 

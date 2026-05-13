@@ -7,7 +7,7 @@
       "direction": "in",
       "name": "req",
       "methods": ["post"],
-      "route": "admin/reset/discursos-pipeline-run"
+      "route": "legisflow/reset/discursos-pipeline-run"
     },
     {
       "type": "http",

@@ -1,5 +1,7 @@
 # LegisFlow Architecture Overview
 
+**Estado do documento:** descreve a arquitetura alvo e o fluxo CEAP em detalhe. A partir de 2026 o mesmo Function App inclui **vários domínios** de ingestão (reference, votacoes, proposicoes, eventos, institucional, discursos) além do CEAP API 2026 — ver `docs/current_state.md` e `docs/pipeline_status.md` para lista e matriz de estado. A secção **12.1** abaixo foi atualizada para refletir o código atual; `docs/decisions.md` ADR-003 permanece como registo histórico da decisão MVP original.
+
 ## 1) Solution Goal
 
 LegisFlow implements an Azure-native Lakehouse platform for Brazilian Chamber of Deputies legislative data, with emphasis on CEAP expense analytics, traceability, idempotent ingestion, and low operational cost.
@@ -14,9 +16,23 @@ The architecture is production-oriented, but constrained to a portfolio-friendly
 - Legislative events calendar analytics
 - Attendance and absenteeism monitoring
 
-### Optional Extension
+### API ingestion to RAW (implemented in repo, same Function App)
 
-- Voting micro-batch ingestion and DLT quality/SLA pipeline
+The Python Function project under `functions/ceap_expenses_ingestion_timer/` now contains **timer dispatchers**, **queue workers**, **poison handlers**, and **HTTP replay/reset** helpers for:
+
+- **CEAP** (`ceap_api_2026_*`) — primary production path for deputado despesas
+- **reference** — dimension snapshots (partidos, legislaturas, deputados, frentes, orgaos)
+- **votacoes** — list + per-votação votos
+- **proposicoes** — list + autores + tramitações per proposição
+- **eventos** — list + per-evento deputados/orgaos/pauta/votacoes
+- **institucional** — daily fanout from orgaos/partidos/frentes/legislaturas to membros/lideres/mesa
+- **discursos** — deputies snapshot + per-deputado discursos window
+
+Declarative configuration lives in `shared/domain_catalog.py`. Queues and app settings are provisioned in Terraform module `infra/terraform/ingestion`.
+
+### Optional Extension (still broader than code)
+
+- DLT quality/SLA automation and full analytical coverage for all new RAW prefixes in Databricks (see `docs/pipeline_status.md`).
 
 ## 3) Platform Components
 
@@ -46,7 +62,13 @@ The architecture uses separate resource groups for workload and Terraform backen
 4. **Replay** HTTP `fn_replay_ceap_failed_messages` lê **IngestionState** (estados como FAILED/POISON), reenfileira com `pipeline_run_id` opcional ou `ceap_replay_YYYYMMDD`, e **não** substitui a reconciliação mensal; serve só para reprocessamento manual. Runbook: `docs/runbooks/ceap_api_ingestion_2026.md`.
 5. **Histórico 2019–2025**: ficheiros estáticos (fora deste fluxo API).
 6. **Legado desativado**: `ceap_expenses_ingestion_timer` monolítico permanece no pacote mas desativado por predefinição (`AzureWebJobs...Disabled` + `CEAP_LEGACY_MONOLITH_ENABLED=false`); só para emergência.
-7. Databricks jobs materializam Bronze → Silver → Gold Delta layers; deduplicação CEAP API descrita em `docs/pipelines/ceap_deduplication_bronze_silver.md`.
+7. Databricks jobs materializam Bronze → Silver → Gold Delta layers; deduplicação CEAP API descrita em `docs/pipelines/ceap_deduplication_bronze_silver.md`. Consumo Bronze/Delta dos **novos** prefixos RAW (fora CEAP) não está descrito neste ficheiro como concluído — ver `docs/pipeline_status.md`.
+
+### 5.1) Outros domínios API → fila → RAW (resumo)
+
+Padrão comum: **timer dispatcher** (com lock em `IngestionControlApi2026`) lista ou descobre IDs, grava páginas de lista em ADLS quando aplicável, enfileira `DomainWorkMessage` JSON na fila **work**; **queue worker** pagina o sub-endpoint, escreve RAW com envelope de auditoria (`shared/raw_audit.py`), atualiza `IngestionState` e contadores do run; **poison queue** + handler marcam `POISON`; **HTTP replay** re-enfileira `FAILED`/`POISON`; **HTTP reset** (flags `ENABLE_*`) limpa artefactos por `pipeline_run_id` em ambiente controlado.
+
+Fluxo API → Azure Functions → **Queue Storage (mesma conta que `CEAP_QUEUE_STORAGE` / connection da Function)** → **ADLS Gen2 (lakehouse)**; Databricks permanece etapa seguinte para modelação Delta. Detalhe de filas, `pipeline_run_id` e paths: `docs/current_state.md`, `docs/raw_layer.md`, `shared/domain_catalog.py`.
 
 ## 6) Layering Strategy (Lakehouse)
 
@@ -208,17 +230,22 @@ Current MVP workflows:
 
 MVP intentionally excludes Databricks asset deployment workflow and future function deployment workflows.
 
-## 12.1) Function App and Function Scope (MVP)
+## 12.1) Function App and Function Scope (current code)
 
-- One Function App: `func-legisflow-ingestion-dev`
-- Implemented now: `ceap_expenses_ingestion_timer`
-- Not implemented yet:
-  - `legislative_events_ingestion_timer`
-  - `voting_microbatch_timer`
-  - `parliamentary_fronts_ingestion_timer`
-  - `propositions_lifecycle_ingestion_timer`
+- **One Function App** (dev name in Terraform): `func-legisflow-ingestion-dev` (variable `function_app_name`).
+- **Legacy timer** `ceap_expenses_ingestion_timer` remains in the package but is **disabled by default** (`AzureWebJobs.ceap_expenses_ingestion_timer.Disabled`, `CEAP_LEGACY_MONOLITH_ENABLED=false` in Terraform ingestion app settings).
+- **Implemented function folders** (each with `function.json` + `__init__.py` where applicable):
+  - **CEAP:** `ceap_api_2026_dispatcher`, `ceap_api_2026_worker`, `ceap_api_2026_poison_handler`, `fn_replay_ceap_failed_messages`, `fn_reset_ceap_pipeline_run`
+  - **reference:** `reference_snapshot_dispatcher`, `reference_snapshot_worker`, `reference_snapshot_poison_handler`, `fn_replay_reference_failed_messages`, `fn_reset_reference_pipeline_run`
+  - **votacoes:** `votacoes_dispatcher`, `votacoes_worker`, `votacoes_poison_handler`, `fn_replay_votacoes_failed_messages`, `fn_reset_votacoes_pipeline_run`
+  - **proposicoes:** `proposicoes_dispatcher`, `proposicoes_worker`, `proposicoes_poison_handler`, `fn_replay_proposicoes_failed_messages`, `fn_reset_proposicoes_pipeline_run`
+  - **eventos:** `eventos_dispatcher`, `eventos_worker`, `eventos_poison_handler`, `fn_replay_eventos_failed_messages`, `fn_reset_eventos_pipeline_run`
+  - **institucional:** `institucional_dispatcher`, `institucional_worker`, `institucional_poison_handler`, `fn_replay_institucional_failed_messages`, `fn_reset_institucional_pipeline_run`
+  - **discursos:** `discursos_dispatcher`, `discursos_worker`, `discursos_poison_handler`, `fn_replay_discursos_failed_messages`, `fn_reset_discursos_pipeline_run`
 
-Future endpoints must be delivered later as separate functions inside the same Function App, not inside the CEAP function implementation.
+Older roadmap names such as `legislative_events_ingestion_timer` / `voting_microbatch_timer` **do not** map 1:1 to folder names above; capability is covered by the **eventos** / **votacoes** domains instead.
+
+Shared libraries (`shared/`) hold API client, ADLS writer, run registry, partition state, queue messages, Raw audit/metadata, and domain-specific `*_raw_manifest.py` / `*_run.py` / `*_pipeline_reset*.py`.
 
 Authentication model:
 

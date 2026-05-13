@@ -179,10 +179,16 @@ class CamaraApiClient:
         page: int = 1,
         itens: int = 100,
     ) -> tuple[dict[str, Any], int]:
-        """GET ``/eventos/{id}/deputados`` paginated."""
-        return self.list_endpoint_page(
-            f"/eventos/{evento_id}/deputados", page=page, itens=itens
-        )
+        """GET ``/eventos/{id}/deputados``.
+
+        The Câmara API rejects ``pagina`` / ``itens`` on this sub-resource (400);
+        it returns the full payload in a single response. Subsequent "pages"
+        are represented as an empty payload so :func:`run_evento_sub_snapshot`
+        can stop cleanly.
+        """
+        if page > 1:
+            return {"dados": [], "links": []}, 200
+        return self._get(f"{self.base_url}/eventos/{evento_id}/deputados", params=None)
 
     def list_evento_orgaos_page(
         self,
@@ -191,10 +197,10 @@ class CamaraApiClient:
         page: int = 1,
         itens: int = 100,
     ) -> tuple[dict[str, Any], int]:
-        """GET ``/eventos/{id}/orgaos`` paginated."""
-        return self.list_endpoint_page(
-            f"/eventos/{evento_id}/orgaos", page=page, itens=itens
-        )
+        """GET ``/eventos/{id}/orgaos`` (single response; no ``pagina``/``itens``)."""
+        if page > 1:
+            return {"dados": [], "links": []}, 200
+        return self._get(f"{self.base_url}/eventos/{evento_id}/orgaos", params=None)
 
     def list_evento_pauta_page(
         self,
@@ -203,10 +209,10 @@ class CamaraApiClient:
         page: int = 1,
         itens: int = 100,
     ) -> tuple[dict[str, Any], int]:
-        """GET ``/eventos/{id}/pauta`` paginated."""
-        return self.list_endpoint_page(
-            f"/eventos/{evento_id}/pauta", page=page, itens=itens
-        )
+        """GET ``/eventos/{id}/pauta`` (single response; no ``pagina``/``itens``)."""
+        if page > 1:
+            return {"dados": [], "links": []}, 200
+        return self._get(f"{self.base_url}/eventos/{evento_id}/pauta", params=None)
 
     def list_evento_votacoes_page(
         self,
@@ -215,10 +221,10 @@ class CamaraApiClient:
         page: int = 1,
         itens: int = 100,
     ) -> tuple[dict[str, Any], int]:
-        """GET ``/eventos/{id}/votacoes`` paginated."""
-        return self.list_endpoint_page(
-            f"/eventos/{evento_id}/votacoes", page=page, itens=itens
-        )
+        """GET ``/eventos/{id}/votacoes`` (single response; no ``pagina``/``itens``)."""
+        if page > 1:
+            return {"dados": [], "links": []}, 200
+        return self._get(f"{self.base_url}/eventos/{evento_id}/votacoes", params=None)
 
     # --- institucional helpers ------------------------------------------------
 

@@ -40,6 +40,8 @@ DEFAULT_MAX_TASKS_PER_DISPATCH = 1000
 SCHEDULE_EVERY_10_MIN = "0 */10 * * * *"
 SCHEDULE_EVERY_20_MIN = "0 */20 * * * *"
 SCHEDULE_DAILY_AT_06_UTC = "0 0 6 * * *"
+# Votações microbatch: every 10 minutes, Monday–Friday (UTC) — see Terraform override.
+SCHEDULE_VOTACOES_MICROBATCH_WEEKDAYS = "0 */10 * * * 1-5"
 
 # Default microbatch lookback (votacoes): how far back the dispatcher scans on
 # every tick (overlap with the previous tick provides safety net for late
@@ -191,8 +193,8 @@ REFERENCE_DOMAIN = DomainSpec(
 VOTACOES_DOMAIN = DomainSpec(
     name="votacoes",
     description=(
-        "Votações: lista por janela (microbatch) e fanout para "
-        "/votacoes/{id}/votos (um worker por votação)."
+        "Votações: microbatch (janela recente) + reconciliação mensal; fanout "
+        "para /votacoes/{id}/votos (um worker por votação)."
     ),
     pipeline_run_id_prefixes=(
         "votacoes_microbatch_",
@@ -201,10 +203,11 @@ VOTACOES_DOMAIN = DomainSpec(
     queue_work="votacoes-api-work",
     queue_poison="votacoes-api-work-poison",
     state_partition_key="votacoes_2026",
-    runs_partition_key="_runs_votacoes",
-    locks_partition_key="_locks_votacoes",
+    # Same control table layout as CEAP: all automated runs live under ``_runs``.
+    runs_partition_key="_runs",
+    locks_partition_key="_locks",
     lock_row_key="votacoes_dispatcher_lock",
-    schedule_cron=SCHEDULE_EVERY_10_MIN,
+    schedule_cron=SCHEDULE_VOTACOES_MICROBATCH_WEEKDAYS,
     endpoints=(
         EndpointSpec(
             name="votacoes",

@@ -7,7 +7,7 @@
       "direction": "in",
       "name": "req",
       "methods": ["post"],
-      "route": "legisflow/reset/eventos-pipeline-run"
+      "route": "legisflow/votacoes/start-reconciliation"
     },
     {
       "type": "http",

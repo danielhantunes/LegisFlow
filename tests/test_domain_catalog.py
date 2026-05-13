@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from collections import Counter
+
 from shared.domain_catalog import (
     CEAP_DOMAIN,
     DISCURSOS_DOMAIN,
@@ -80,7 +82,9 @@ def test_each_domain_has_unique_queue_and_partition_keys() -> None:
     state_keys = [d.state_partition_key for d in list_domains()]
     assert len(state_keys) == len(set(state_keys))
     runs_keys = [d.runs_partition_key for d in list_domains()]
-    assert len(runs_keys) == len(set(runs_keys))
+    counts = Counter(runs_keys)
+    assert counts["_runs"] == 2  # CEAP + votacoes share IngestionControl partition
+    assert all(n == 1 for k, n in counts.items() if k != "_runs")
 
 
 def test_reference_domain_advertises_audit_strategy() -> None:

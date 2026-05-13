@@ -7,7 +7,7 @@
       "direction": "in",
       "name": "req",
       "methods": ["post"],
-      "route": "admin/reset/reference-pipeline-run"
+      "route": "legisflow/reset/reference-pipeline-run"
     },
     {
       "type": "http",

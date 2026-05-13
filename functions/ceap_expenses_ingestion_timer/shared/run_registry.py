@@ -64,18 +64,33 @@ class GenericRunRegistry:
             return None
 
     def upsert_run(self, fields: dict[str, Any]) -> None:
+        """Merge ``fields`` into the existing run row and persist with *replace*.
+
+        Table Storage ``merge`` updates can fail to clear counters when callers
+        explicitly set numeric fields to ``0`` / ``False`` (payload quirks in
+        some host/SDK combinations). We therefore read the latest row, merge in
+        Python, and ``upsert_entity(..., mode="replace")`` so every property we
+        keep is written exactly as intended.
+        """
         pid = fields["pipeline_run_id"]
-        entity: dict[str, Any] = {
-            "PartitionKey": self.runs_partition_key,
-            "RowKey": pid,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            **{
-                k: v
-                for k, v in fields.items()
-                if k != "pipeline_run_id" and v is not None
-            },
-        }
-        self.table_client.upsert_entity(entity=entity, mode="merge")
+        raw = self.get_run(pid)
+        merged: dict[str, Any] = {}
+        if raw:
+            for key, val in raw.items():
+                if key in ("PartitionKey", "RowKey", "Timestamp", "etag"):
+                    continue
+                merged[key] = val
+        for key, val in fields.items():
+            if key == "pipeline_run_id":
+                continue
+            if val is None:
+                merged.pop(key, None)
+            else:
+                merged[key] = val
+        merged["PartitionKey"] = self.runs_partition_key
+        merged["RowKey"] = pid
+        merged["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self.table_client.upsert_entity(entity=merged, mode="replace")
 
     def try_acquire_dispatcher_lock(
         self,

@@ -1,6 +1,6 @@
-"""Queue trigger: votações worker (snapshot dos votos por votação).
+"""Queue trigger: votações API worker (snapshot dos votos por votação).
 
-Consumes one message produced by ``votacoes_dispatcher`` and runs the full
+Consumes one message produced by ``votacoes_api_dispatcher`` and runs the full
 ``/votacoes/{id}/votos`` pagination via :func:`shared.votacoes_run.run_votacao_votos_snapshot`.
 """
 
@@ -67,6 +67,8 @@ def main(msg: func.QueueMessage) -> None:
 
     payload = wm.payload or {}
     votacao_id = str(payload.get("votacao_id", "")).strip()
+    list_record_uid = str(payload.get("list_record_uid", "") or "")
+    list_record_hash = str(payload.get("list_record_hash", "") or "")
     if not votacao_id:
         log_structured(
             logger,
@@ -191,6 +193,8 @@ def main(msg: func.QueueMessage) -> None:
                 "pages_written": result.pages_written,
                 "raw_path": result.last_raw_path,
                 "last_error": "",
+                "last_votacao_list_record_uid": list_record_uid,
+                "last_votacao_list_record_hash": list_record_hash,
             },
         )
         registry.merge_run_counters(wm.pipeline_run_id, success_delta=1)
