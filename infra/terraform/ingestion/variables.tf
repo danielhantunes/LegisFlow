@@ -186,7 +186,7 @@ variable "votacoes_target_year" {
 
 variable "enable_manual_votacoes_reconciliation_function" {
   type        = bool
-  description = "When true, sets ENABLE_MANUAL_RECONCILIATION_FUNCTIONS for fn_start_votacoes_reconciliation."
+  description = "When true, sets ENABLE_MANUAL_RECONCILIATION_FUNCTIONS for manual reconciliation HTTP starters (votacoes, proposicoes, eventos, discursos)."
   default     = false
 }
 
@@ -220,8 +220,14 @@ variable "proposicoes_dispatch_granularity_min" {
 
 variable "proposicoes_lookback_minutes" {
   type        = number
-  description = "How far back the proposicoes dispatcher scans /proposicoes on every tick."
+  description = "Legacy setting; proposicoes list window uses PROPOSICOES_MICROBATCH_LOOKBACK_DAYS (API dataInicio/dataFim). Kept for compatibility."
   default     = 60
+}
+
+variable "proposicoes_microbatch_lookback_days" {
+  type        = number
+  description = "Inclusive rolling calendar-day span for /proposicoes dataInicio/dataFim in microbatch mode (default 7)."
+  default     = 7
 }
 
 variable "proposicoes_lock_ttl_minutes" {
@@ -240,6 +246,18 @@ variable "proposicoes_max_list_pages" {
   type        = number
   description = "Maximum pages the proposicoes dispatcher will fetch from /proposicoes per tick."
   default     = 200
+}
+
+variable "proposicoes_reconciliation_day" {
+  type        = number
+  description = "UTC calendar day each month when proposicoes timer runs reconciliation instead of microbatch."
+  default     = 25
+}
+
+variable "proposicoes_recon_max_pages_per_tick" {
+  type        = number
+  description = "Max /proposicoes list pages per timer tick during monthly reconciliation resume."
+  default     = 40
 }
 
 variable "enable_proposicoes_reset_function" {
@@ -292,6 +310,36 @@ variable "eventos_max_list_pages" {
   type        = number
   description = "Maximum pages the eventos dispatcher will fetch from /eventos per tick."
   default     = 200
+}
+
+variable "eventos_reconciliation_day" {
+  type        = number
+  description = "UTC calendar day each month when eventos timer runs reconciliation instead of microbatch."
+  default     = 25
+}
+
+variable "eventos_reconciliation_lookback_days" {
+  type        = number
+  description = "Inclusive day span for eventos monthly reconciliation (/eventos list window)."
+  default     = 30
+}
+
+variable "eventos_recon_max_pages_per_tick" {
+  type        = number
+  description = "Max /eventos list pages per timer tick during monthly reconciliation resume."
+  default     = 40
+}
+
+variable "eventos_microbatch_past_days" {
+  type        = number
+  description = "Days before 'now' included in eventos microbatch /eventos list window."
+  default     = 7
+}
+
+variable "eventos_microbatch_future_days" {
+  type        = number
+  description = "Days after 'now' included in eventos microbatch /eventos list window."
+  default     = 7
 }
 
 variable "enable_eventos_reset_function" {
@@ -384,6 +432,24 @@ variable "discursos_max_list_pages" {
   type        = number
   description = "Maximum pages the discursos dispatcher will fetch from /deputados (parent listing) per tick."
   default     = 20
+}
+
+variable "discursos_reconciliation_day" {
+  type        = number
+  description = "UTC calendar day each month when discursos timer runs reconciliation instead of microbatch."
+  default     = 25
+}
+
+variable "discursos_reconciliation_lookback_days" {
+  type        = number
+  description = "Inclusive day span for discursos monthly reconciliation (API dateInicio/dataFim on worker messages)."
+  default     = 90
+}
+
+variable "discursos_recon_max_pages_per_tick" {
+  type        = number
+  description = "Max /deputados list pages per timer tick during monthly discursos reconciliation resume."
+  default     = 40
 }
 
 variable "enable_discursos_reset_function" {

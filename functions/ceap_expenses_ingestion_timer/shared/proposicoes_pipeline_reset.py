@@ -3,6 +3,11 @@
 Mirrors :mod:`shared.votacoes_pipeline_reset` but scoped to the proposicoes
 domain. Guarded by either ``ENABLE_RESET_FUNCTIONS=true`` or
 ``ENABLE_PROPOSICOES_RESET_FUNCTION=true``.
+
+Deletes Raw under ``list/``, ``autores/``, ``tramitacoes/``, and ``_metadata/``
+(including reconciliation ``discovered_fingerprints.json`` and aggregate
+``metadata.json``). Removing the control row clears ``recon_list_next_page`` /
+``recon_listing_complete`` for the next dispatcher pass.
 """
 
 from __future__ import annotations

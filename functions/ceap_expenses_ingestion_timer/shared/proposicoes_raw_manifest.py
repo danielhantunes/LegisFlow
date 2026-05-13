@@ -32,6 +32,7 @@ from .metadata import (
     PROFILE_DIMENSION_SNAPSHOT,
     PROFILE_FANOUT_RUN,
     RunStatus,
+    RunType,
     build_run_metadata,
     validate_completed_metadata,
     write_run_metadata,
@@ -102,6 +103,7 @@ def build_proposicoes_dispatcher_run_metadata(
     audit_fields_applied: tuple[str, ...] = DEFAULT_AUDIT_FIELDS,
     total_raw_files_written: int | None = None,
     total_records_collected: int | None = None,
+    manifest_extras: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     st_upper = str(status).upper()
     normalized = cast(
@@ -124,8 +126,22 @@ def build_proposicoes_dispatcher_run_metadata(
         run_type_norm = "reconciliation"
     elif mode == "backfill":
         run_type_norm = "backfill"
+    elif mode == "microbatch":
+        run_type_norm = "microbatch"
     else:
         run_type_norm = "daily"
+    part_block: dict[str, Any] = {
+        "watermark_field": "ultimaTramitacao_dataHora",
+        "watermark_start": window_start_utc or "",
+        "watermark_end": window_end_utc or "",
+    }
+    if manifest_extras:
+        ds = manifest_extras.get("date_start")
+        de = manifest_extras.get("date_end")
+        if ds:
+            part_block["date_start"] = str(ds)
+        if de:
+            part_block["date_end"] = str(de)
     meta = build_run_metadata(
         source=source_system,
         domain="proposicoes",
@@ -135,18 +151,14 @@ def build_proposicoes_dispatcher_run_metadata(
         api_path="/proposicoes + /proposicoes/{id}/{autores|tramitacoes}",
         pipeline_run_id=pipeline_run_id,
         execution_id=pipeline_run_id,
-        run_type=run_type_norm,
+        run_type=cast(RunType, run_type_norm),
         status=normalized,
         started_at=started_at_utc,
         completed_at=finished_at_utc,
         raw_path=raw_dir,
         success_marker_path=success_path,
         error_message=error_message,
-        partitioning={
-            "watermark_field": "ultimaTramitacao_dataHora",
-            "watermark_start": window_start_utc or "",
-            "watermark_end": window_end_utc or "",
-        },
+        partitioning=part_block,
         tasks={
             "total_tasks_expected": int(total_tasks_expected or 0),
             "total_tasks_queued": int(total_tasks_queued or 0),
@@ -195,6 +207,10 @@ def build_proposicoes_dispatcher_run_metadata(
         meta["error_type"] = error_type
     elif "error_type" in meta:
         del meta["error_type"]
+    if manifest_extras:
+        for k, v in manifest_extras.items():
+            if v is not None:
+                meta[k] = v
     return meta
 
 

@@ -3,6 +3,11 @@
 Mirrors :mod:`shared.proposicoes_pipeline_reset` but scoped to the eventos
 domain. Guarded by either ``ENABLE_RESET_FUNCTIONS=true`` or
 ``ENABLE_EVENTOS_RESET_FUNCTION=true``.
+
+Raw cleanup covers ``list/``, the four fanout prefixes, and ``_metadata/``
+(aggregate metadata, per-evento manifests, and reconciliation
+``discovered_fingerprints.json``). Deleting the control row clears reconciliation
+resume fields for the next dispatcher tick.
 """
 
 from __future__ import annotations

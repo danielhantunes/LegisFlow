@@ -89,6 +89,7 @@ def build_discursos_dispatcher_run_metadata(
     audit_fields_applied: tuple[str, ...] = DEFAULT_AUDIT_FIELDS,
     total_raw_files_written: int | None = None,
     total_records_collected: int | None = None,
+    manifest_extras: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     st_upper = str(status).upper()
     normalized = cast(
@@ -186,6 +187,10 @@ def build_discursos_dispatcher_run_metadata(
         meta["error_type"] = error_type
     elif "error_type" in meta:
         del meta["error_type"]
+    if manifest_extras:
+        for k, v in manifest_extras.items():
+            if v is not None:
+                meta[k] = v
     return meta
 
 

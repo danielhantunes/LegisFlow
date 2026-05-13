@@ -227,11 +227,14 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "PROPOSICOES_DISPATCH_SCHEDULE"        = var.proposicoes_dispatch_schedule
     "PROPOSICOES_DISPATCH_GRANULARITY_MIN" = tostring(var.proposicoes_dispatch_granularity_min)
     "PROPOSICOES_LOOKBACK_MINUTES"         = tostring(var.proposicoes_lookback_minutes)
+    "PROPOSICOES_MICROBATCH_LOOKBACK_DAYS" = tostring(var.proposicoes_microbatch_lookback_days)
     "PROPOSICOES_QUEUE_NAME"               = azurerm_storage_queue.proposicoes_work.name
     "PROPOSICOES_POISON_QUEUE_NAME"        = azurerm_storage_queue.proposicoes_poison.name
     "PROPOSICOES_LOCK_TTL_MINUTES"         = tostring(var.proposicoes_lock_ttl_minutes)
     "PROPOSICOES_MAX_MESSAGES_PER_TICK"    = tostring(var.proposicoes_max_messages_per_tick)
     "PROPOSICOES_MAX_LIST_PAGES"           = tostring(var.proposicoes_max_list_pages)
+    "PROPOSICOES_RECONCILIATION_DAY"       = tostring(var.proposicoes_reconciliation_day)
+    "PROPOSICOES_RECON_MAX_PAGES_PER_TICK" = tostring(var.proposicoes_recon_max_pages_per_tick)
     "ENABLE_PROPOSICOES_RESET_FUNCTION"    = var.enable_proposicoes_reset_function ? "true" : "false"
 
     # ----- Eventos domain ---------------------------------------------------
@@ -243,6 +246,11 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "EVENTOS_LOCK_TTL_MINUTES"         = tostring(var.eventos_lock_ttl_minutes)
     "EVENTOS_MAX_MESSAGES_PER_TICK"    = tostring(var.eventos_max_messages_per_tick)
     "EVENTOS_MAX_LIST_PAGES"           = tostring(var.eventos_max_list_pages)
+    "EVENTOS_RECONCILIATION_DAY"       = tostring(var.eventos_reconciliation_day)
+    "EVENTOS_RECONCILIATION_LOOKBACK_DAYS" = tostring(var.eventos_reconciliation_lookback_days)
+    "EVENTOS_RECON_MAX_PAGES_PER_TICK" = tostring(var.eventos_recon_max_pages_per_tick)
+    "EVENTOS_MICROBATCH_PAST_DAYS"     = tostring(var.eventos_microbatch_past_days)
+    "EVENTOS_MICROBATCH_FUTURE_DAYS"   = tostring(var.eventos_microbatch_future_days)
     "ENABLE_EVENTOS_RESET_FUNCTION"    = var.enable_eventos_reset_function ? "true" : "false"
 
     # ----- Institucional domain --------------------------------------------
@@ -263,6 +271,9 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "DISCURSOS_LOCK_TTL_MINUTES"         = tostring(var.discursos_lock_ttl_minutes)
     "DISCURSOS_MAX_MESSAGES_PER_TICK"    = tostring(var.discursos_max_messages_per_tick)
     "DISCURSOS_MAX_LIST_PAGES"           = tostring(var.discursos_max_list_pages)
+    "DISCURSOS_RECONCILIATION_DAY"       = tostring(var.discursos_reconciliation_day)
+    "DISCURSOS_RECONCILIATION_LOOKBACK_DAYS" = tostring(var.discursos_reconciliation_lookback_days)
+    "DISCURSOS_RECON_MAX_PAGES_PER_TICK" = tostring(var.discursos_recon_max_pages_per_tick)
     "ENABLE_DISCURSOS_RESET_FUNCTION"    = var.enable_discursos_reset_function ? "true" : "false"
 
     # ----- Daily consolidated summary -------------------------------------

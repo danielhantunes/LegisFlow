@@ -28,9 +28,12 @@ import azure.functions as func
 from shared.adls_writer import AdlsRawWriter
 from shared.api_client import CamaraApiClient
 from shared.domain_catalog import (
-    DEFAULT_MICROBATCH_LOOKBACK_MINUTES,
     EVENTOS_DOMAIN,
     eventos_microbatch_run_id,
+)
+from shared.eventos_reconciliation_tick import (
+    default_eventos_reconciliation_window,
+    execute_eventos_reconciliation_tick,
 )
 from shared.eventos_raw_manifest import (
     EVENTO_SUB_ENDPOINTS,
@@ -68,24 +71,32 @@ def _fmt_window_param(dt: datetime) -> str:
 def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     domain = EVENTOS_DOMAIN
     now = datetime.now(UTC)
+    recon_day = max(1, min(28, int(os.getenv("EVENTOS_RECONCILIATION_DAY", "25"))))
+    lookback_days = max(
+        1, int(os.getenv("EVENTOS_RECONCILIATION_LOOKBACK_DAYS", "30"))
+    )
+    if now.day == recon_day:
+        ds, de = default_eventos_reconciliation_window(now=now, lookback_days=lookback_days)
+        execute_eventos_reconciliation_tick(
+            now=now,
+            date_start=ds,
+            date_end=de,
+            recon_day=recon_day,
+            lookback_days=lookback_days,
+        )
+        return
+
     granularity = max(
         1, int(os.getenv("EVENTOS_DISPATCH_GRANULARITY_MIN", "20"))
     )
-    lookback_min = max(
-        granularity,
-        int(
-            os.getenv(
-                "EVENTOS_LOOKBACK_MINUTES",
-                str(DEFAULT_MICROBATCH_LOOKBACK_MINUTES),
-            )
-        ),
-    )
+    past_days = max(0, int(os.getenv("EVENTOS_MICROBATCH_PAST_DAYS", "7")))
+    future_days = max(0, int(os.getenv("EVENTOS_MICROBATCH_FUTURE_DAYS", "7")))
     anchor = _round_minute_down(now, granularity)
     pipeline_run_id = eventos_microbatch_run_id(
         anchor.strftime("%Y-%m-%dT%H:%M")
     )
-    window_end = now
-    window_start = window_end - timedelta(minutes=lookback_min)
+    window_end = now + timedelta(days=future_days)
+    window_start = now - timedelta(days=past_days)
 
     conn = os.environ["AzureWebJobsStorage"]
     control_table = os.getenv("INGESTION_CONTROL_TABLE", "IngestionControlApi2026")

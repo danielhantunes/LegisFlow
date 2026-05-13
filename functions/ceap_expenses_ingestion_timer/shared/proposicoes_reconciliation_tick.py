@@ -1,126 +1,105 @@
-"""Timer: proposições dispatcher (microbatch + fanout to autores+tramitacoes).
-
-Each tick (modo normal, fora do dia de reconciliação):
-
-1. Computes ``proposicoes_microbatch_YYYYMMDDHHMM`` from the current minute
-   (rounded down to ``PROPOSICOES_DISPATCH_GRANULARITY_MIN``).
-2. Acquires the proposicoes dispatcher lock.
-3. Lists ``/proposicoes`` with ``dataInicio`` / ``dataFim`` = últimos
-   ``PROPOSICOES_MICROBATCH_LOOKBACK_DAYS`` dias corridos (inclusive), em
-   ``YYYY-MM-DD``. A API da Câmara filtra pela **última atualização de
-   tramitação** nesse intervalo de **datas** (não há filtro por hora).
-4. Persists each list page under ``raw/camara/proposicoes/api/list/...`` with
-   full ``_audit`` envelope.
-5. For every proposicao_id detected, enqueues TWO ``DomainWorkMessage`` (one
-   for ``proposicao_autores`` and one for ``proposicao_tramitacoes``).
-6. Reconciles run counters from ``IngestionState`` and writes the aggregate
-   ``metadata.json`` (+ ``_SUCCESS`` only when strictly completed).
-
-No dia ``PROPOSICOES_RECONCILIATION_DAY`` (UTC), delega para reconciliação
-mensal (janeiro–hoje), com ``pipeline_run_id`` distinto.
-"""
+"""Monthly / manual reconciliation tick for proposições (list + fanout)."""
 
 from __future__ import annotations
 
 import json
 import os
 import uuid
-from datetime import UTC, datetime, timedelta, time
+from datetime import UTC, datetime
 from typing import Any
 
-import azure.functions as func
-
-from shared.adls_writer import AdlsRawWriter
-from shared.api_client import CamaraApiClient
-from shared.domain_catalog import (
-    PROPOSICOES_DOMAIN,
-    proposicoes_microbatch_run_id,
-)
-from shared.proposicoes_reconciliation_tick import execute_proposicoes_reconciliation_tick
-from shared.generic_partition_state import GenericPartitionStateStore
-from shared.logger import get_logger, log_structured
-from shared.proposicoes_raw_manifest import (
+from .adls_writer import AdlsRawWriter
+from .api_client import CamaraApiClient
+from .domain_catalog import PROPOSICOES_DOMAIN, proposicoes_reconciliation_run_id
+from .generic_partition_state import GenericPartitionStateStore
+from .logger import get_logger, log_structured
+from .proposicoes_raw_manifest import (
     PROPOSICOES_LIST_PREFIX,
     build_proposicoes_dispatcher_run_metadata,
     persist_proposicoes_run_metadata,
+    proposicoes_run_manifest_prefix,
 )
-from shared.queue_helpers import (
-    prepare_queue_client_for_dispatch,
-    send_json_message_with_client,
-)
-from shared.queue_messages import DomainWorkMessage
-from shared.raw_audit import enrich_generic_page_payload
-from shared.run_registry import GenericRunRegistry
+from .queue_helpers import prepare_queue_client_for_dispatch, send_json_message_with_client
+from .queue_messages import DomainWorkMessage
+from .raw_audit import enrich_generic_page_payload
+from .reconciliation_fingerprints import load_fingerprints, save_fingerprints
+from .run_registry import GenericRunRegistry
+from .votacoes_api_dispatcher_logic import list_item_uid_hash
 
 logger = get_logger()
-
 
 _SUB_ENDPOINTS = ("proposicao_autores", "proposicao_tramitacoes")
 
 
 def _state_row_key(endpoint_name: str, proposicao_id: str) -> str:
-    """One IngestionState row per (sub_endpoint, proposicao_id)."""
     return f"{endpoint_name}|{proposicao_id}"
 
 
-def _round_minute_down(now: datetime, granularity_min: int) -> datetime:
-    minute = (now.minute // granularity_min) * granularity_min
-    return now.replace(minute=minute, second=0, microsecond=0)
-
-
-def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
-    domain = PROPOSICOES_DOMAIN
-    now = datetime.now(UTC)
-    recon_day = max(1, min(28, int(os.getenv("PROPOSICOES_RECONCILIATION_DAY", "25"))))
-    target_year = int(os.getenv("TARGET_YEAR", str(now.year)))
-    if now.day == recon_day:
-        date_start = f"{target_year}-01-01"
-        date_end = now.date().isoformat()
-        execute_proposicoes_reconciliation_tick(
-            now=now,
+def count_proposicoes_in_date_range_dry_run(
+    *,
+    api: CamaraApiClient,
+    list_endpoint: Any,
+    date_start: str,
+    date_end: str,
+    max_pages: int,
+) -> tuple[int, int, list[str]]:
+    warnings: list[str] = []
+    seen: set[str] = set()
+    page = 1
+    while page <= max_pages:
+        payload, _http = api.list_proposicoes_page(
+            page=page,
+            itens=list_endpoint.items_per_page,
             date_start=date_start,
             date_end=date_end,
-            target_year=target_year,
-            recon_day=recon_day,
         )
-        return
+        dados = payload.get("dados") or []
+        for item in dados:
+            if isinstance(item, dict) and item.get("id") is not None:
+                seen.add(str(item.get("id")))
+        links = payload.get("links") or []
+        has_next = any(
+            isinstance(li, dict) and li.get("rel") == "next" for li in links
+        )
+        if not has_next:
+            break
+        page += 1
+    if page >= max_pages:
+        warnings.append("max_list_pages_reached_during_count")
+    return len(seen), page, warnings
 
-    granularity = max(
-        1, int(os.getenv("PROPOSICOES_DISPATCH_GRANULARITY_MIN", "20"))
-    )
-    lookback_days = max(
-        1,
-        min(366, int(os.getenv("PROPOSICOES_MICROBATCH_LOOKBACK_DAYS", "7"))),
-    )
-    anchor = _round_minute_down(now, granularity)
-    pipeline_run_id = proposicoes_microbatch_run_id(
-        anchor.strftime("%Y-%m-%dT%H:%M")
-    )
-    date_end_d = now.date()
-    date_start_d = date_end_d - timedelta(days=lookback_days - 1)
-    date_start = date_start_d.isoformat()
-    date_end = date_end_d.isoformat()
-    window_start = datetime.combine(date_start_d, time.min, tzinfo=UTC)
-    window_end = datetime.combine(date_end_d, time.max.replace(microsecond=999999), tzinfo=UTC)
-    manifest_extras_common: dict[str, Any] = {
-        "date_start": date_start,
-        "date_end": date_end,
-        "microbatch_lookback_days": lookback_days,
-    }
+
+def execute_proposicoes_reconciliation_tick(
+    *,
+    now: datetime,
+    date_start: str,
+    date_end: str,
+    target_year: int,
+    recon_day: int,
+) -> None:
+    def _as_utc(dt: datetime) -> datetime:
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+
+    now_utc = _as_utc(now)
+    domain = PROPOSICOES_DOMAIN
+    pipeline_run_id = proposicoes_reconciliation_run_id(now_utc.strftime("%Y-%m-%d"))
+    window_start = datetime.fromisoformat(f"{date_start}T00:00:00+00:00")
+    window_end_cap = datetime.fromisoformat(f"{date_end}T23:59:59.999999+00:00")
+    window_end = min(now_utc, window_end_cap)
 
     conn = os.environ["AzureWebJobsStorage"]
     control_table = os.getenv("INGESTION_CONTROL_TABLE", "IngestionControlApi2026")
     state_table = os.getenv("INGESTION_STATE_TABLE", "IngestionState")
     queue_name = os.getenv("PROPOSICOES_QUEUE_NAME", domain.queue_work)
     raw_account = os.environ["RAW_STORAGE_ACCOUNT_NAME"]
-    lock_ttl = int(
-        os.getenv("PROPOSICOES_LOCK_TTL_MINUTES", str(domain.lock_ttl_minutes))
-    )
+    lock_ttl = int(os.getenv("PROPOSICOES_LOCK_TTL_MINUTES", str(domain.lock_ttl_minutes)))
     max_messages_per_tick = max(
-        1,
-        int(os.getenv("PROPOSICOES_MAX_MESSAGES_PER_TICK", "1000")),
+        1, int(os.getenv("PROPOSICOES_MAX_MESSAGES_PER_TICK", "1000"))
     )
     max_list_pages = int(os.getenv("PROPOSICOES_MAX_LIST_PAGES", "200"))
+    max_pages_tick = max(1, int(os.getenv("PROPOSICOES_RECON_MAX_PAGES_PER_TICK", "40")))
 
     registry = GenericRunRegistry.from_connection_string(
         conn,
@@ -133,20 +112,19 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         conn, state_table, partition_key=domain.state_partition_key
     )
 
-    run = registry.get_run(pipeline_run_id) or {}
-    run_status = str(run.get("status", "")).upper()
-    if run_status == "COMPLETED":
+    run_pre = registry.get_run(pipeline_run_id) or {}
+    if str(run_pre.get("status", "")).upper() == "COMPLETED":
         log_structured(
             logger,
             "info",
-            "Proposicoes dispatch skipped: run already COMPLETED.",
+            "Proposicoes reconciliation skipped: run already COMPLETED.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
         )
         return
 
     acquired, lock_token = registry.try_acquire_dispatcher_lock(
-        mode="microbatch",
+        mode="reconciliation",
         pipeline_run_id=pipeline_run_id,
         ttl_minutes=lock_ttl,
     )
@@ -154,19 +132,35 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         log_structured(
             logger,
             "info",
-            "Proposicoes dispatch skipped: dispatcher lock held.",
+            "Proposicoes reconciliation skipped: dispatcher lock held.",
+            domain=domain.name,
+            pipeline_run_id=pipeline_run_id,
+        )
+        return
+
+    run = registry.get_run(pipeline_run_id) or {}
+    if str(run.get("status", "")).upper() == "COMPLETED":
+        registry.release_dispatcher_lock(lock_token)
+        log_structured(
+            logger,
+            "info",
+            "Proposicoes reconciliation skipped after lock: COMPLETED.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
         )
         return
 
     started_at = str(run.get("started_at") or now.isoformat())
+    listing_already = bool(run.get("recon_listing_complete"))
+    resume_page = int(run.get("recon_list_next_page") or 1)
+    prev_list_pages = int(run.get("list_pages_written") or 0)
+    prev_list_recs = int(run.get("list_records_collected") or 0)
+
     enqueued_now = 0
     skipped_already_queued = 0
     skipped_already_success = 0
-    list_pages_written = 0
-    list_records_collected = 0
-    detected_ids: set[str] = set()
+    list_pages_this_tick = 0
+    list_recs_this_tick = 0
 
     api = CamaraApiClient(base_url=domain.api_base_url)
     raw_writer = AdlsRawWriter(account_name=raw_account)
@@ -177,20 +171,23 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         f"{PROPOSICOES_LIST_PREFIX}/pipeline_run_id={pipeline_run_id}/"
         f"execution_id={pipeline_run_id}"
     )
+    manifest_prefix = proposicoes_run_manifest_prefix(pipeline_run_id)
+    fingerprints: dict[str, dict[str, str]] = dict(load_fingerprints(raw_writer, manifest_prefix))
 
     try:
         if not run:
             registry.upsert_run(
                 {
                     "pipeline_run_id": pipeline_run_id,
-                    "run_type": "microbatch",
+                    "run_type": "reconciliation",
                     "status": "STARTED",
                     "domain": domain.name,
                     "window_start_utc": window_start.isoformat(),
                     "window_end_utc": window_end.isoformat(),
-                    "api_date_start": date_start,
-                    "api_date_end": date_end,
                     "started_at": started_at,
+                    "target_year": target_year,
+                    "date_start": date_start,
+                    "date_end": date_end,
                     "total_tasks_expected": 0,
                     "total_tasks_queued": 0,
                     "total_tasks_success": 0,
@@ -203,12 +200,21 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     "sub_endpoints": json.dumps(list(_SUB_ENDPOINTS)),
                     "hash_strategy": domain.hash_strategy,
                     "audit_fields_applied": json.dumps(list(domain.audit_fields)),
+                    "recon_listing_complete": False,
+                    "recon_list_next_page": 1,
                 }
             )
 
+        extras_base = {
+            "target_year": target_year,
+            "date_start": date_start,
+            "date_end": date_end,
+            "reconciliation_day": recon_day,
+            "reconciliation_lookback_days": None,
+        }
         running_meta = build_proposicoes_dispatcher_run_metadata(
             pipeline_run_id=pipeline_run_id,
-            mode="microbatch",
+            mode="reconciliation",
             status="RUNNING",
             started_at_utc=started_at,
             finished_at_utc=None,
@@ -229,7 +235,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             source_system=domain.source_system,
             hash_strategy=domain.hash_strategy,
             audit_fields_applied=domain.audit_fields,
-            manifest_extras=manifest_extras_common,
+            manifest_extras=extras_base,
         )
         persist_proposicoes_run_metadata(
             raw_writer,
@@ -238,59 +244,95 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             write_success_marker_now=False,
         )
 
-        # 1) Listagem paginada de /proposicoes (window = última tramitação).
-        page = 1
-        while page <= max_list_pages:
-            payload, _http = api.list_proposicoes_page(
-                page=page,
-                itens=list_endpoint.items_per_page,
-                date_start=date_start,
-                date_end=date_end,
-            )
-            dados = payload.get("dados") or []
-            list_records_collected += len(dados)
-            raw_path = f"{list_dir}/page_{page}.json"
-            enriched = enrich_generic_page_payload(
-                payload,
-                pipeline_run_id=pipeline_run_id,
-                execution_id=pipeline_run_id,
-                domain=domain.name,
-                entity=list_endpoint.name,
-                endpoint=list_endpoint.name,
-                api_path=list_endpoint.path_template,
-                raw_path=raw_path,
-                page=page,
-                business_key_fields=list_endpoint.business_key_fields or ("id",),
-                source_system=domain.source_system,
-                api_base_url=domain.api_base_url,
-                extra_audit={
-                    "_window_start_utc": window_start.isoformat(),
-                    "_window_end_utc": window_end.isoformat(),
-                },
-            )
-            raw_writer.write_json(raw_path, enriched)
-            list_pages_written += 1
-            for item in dados:
-                if isinstance(item, dict):
-                    pid = item.get("id")
-                    if pid is not None:
-                        detected_ids.add(str(pid))
-            links = payload.get("links") or []
-            has_next = any(
-                isinstance(li, dict) and li.get("rel") == "next" for li in links
-            )
-            if not has_next:
-                break
-            page += 1
+        listing_complete = listing_already
+        last_page_fetched = resume_page - 1
+        bkf = list_endpoint.business_key_fields or ("id",)
 
-        # 2) Fanout: enqueue 2 messages (autores + tramitacoes) por proposicao.
+        if not listing_already:
+            page = max(1, resume_page)
+            end_page_limit = min(max_list_pages, page + max_pages_tick - 1)
+            while page <= end_page_limit:
+                payload, _http = api.list_proposicoes_page(
+                    page=page,
+                    itens=list_endpoint.items_per_page,
+                    date_start=date_start,
+                    date_end=date_end,
+                )
+                dados = payload.get("dados") or []
+                list_recs_this_tick += len(dados)
+                raw_path = f"{list_dir}/page_{page}.json"
+                enriched = enrich_generic_page_payload(
+                    payload,
+                    pipeline_run_id=pipeline_run_id,
+                    execution_id=pipeline_run_id,
+                    domain=domain.name,
+                    entity=list_endpoint.name,
+                    endpoint=list_endpoint.name,
+                    api_path=list_endpoint.path_template,
+                    raw_path=raw_path,
+                    page=page,
+                    business_key_fields=bkf,
+                    source_system=domain.source_system,
+                    api_base_url=domain.api_base_url,
+                    extra_audit={
+                        "_window_start_utc": window_start.isoformat(),
+                        "_window_end_utc": window_end.isoformat(),
+                    },
+                )
+                raw_writer.write_json(raw_path, enriched)
+                list_pages_this_tick += 1
+                for item in dados:
+                    if isinstance(item, dict) and item.get("id") is not None:
+                        pid_s = str(item.get("id"))
+                        uid, hsh = list_item_uid_hash(
+                            domain,
+                            endpoint_name=list_endpoint.name,
+                            business_key_fields=bkf,
+                            item=item,
+                        )
+                        fingerprints[pid_s] = {"uid": uid, "hash": hsh}
+                links = payload.get("links") or []
+                has_next = any(
+                    isinstance(li, dict) and li.get("rel") == "next" for li in links
+                )
+                last_page_fetched = page
+                if not has_next:
+                    listing_complete = True
+                    break
+                page += 1
+
+            if listing_complete:
+                registry.upsert_run(
+                    {
+                        "pipeline_run_id": pipeline_run_id,
+                        "recon_listing_complete": True,
+                        "recon_list_next_page": 1,
+                    }
+                )
+            else:
+                registry.upsert_run(
+                    {
+                        "pipeline_run_id": pipeline_run_id,
+                        "recon_listing_complete": False,
+                        "recon_list_next_page": last_page_fetched + 1,
+                    }
+                )
+
+        if fingerprints:
+            save_fingerprints(raw_writer, manifest_prefix, fingerprints)
+
+        total_list_pages = prev_list_pages + list_pages_this_tick
+        total_list_recs = prev_list_recs + list_recs_this_tick
+
         queue_client = prepare_queue_client_for_dispatch(
             queue_name,
             logger=logger,
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
         )
-        for pid in sorted(detected_ids):
+
+        all_ids = sorted(fingerprints.keys())
+        for pid in all_ids:
             if enqueued_now >= max_messages_per_tick:
                 break
             for sub_ep in (autores_ep, tramitacoes_ep):
@@ -312,7 +354,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     domain=domain.name,
                     endpoint=sub_ep.name,
                     pipeline_run_id=pipeline_run_id,
-                    run_type="microbatch",
+                    run_type="reconciliation",
                     payload={
                         "proposicao_id": pid,
                         "window_start_utc": window_start.isoformat(),
@@ -330,21 +372,22 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     endpoint=sub_ep.name,
                     proposicao_id=pid,
                 )
-                patch: dict[str, Any] = {
-                    "endpoint": sub_ep.name,
-                    "proposicao_id": pid,
-                    "status": "QUEUED",
-                    "current_pipeline_run_id": pipeline_run_id,
-                    "last_pipeline_run_id": cur_pid,
-                    "last_dispatched_at": dispatched_at,
-                    "last_execution_id": execution_id,
-                    "attempt_count": int(state.get("attempt_count", 0) or 0),
-                    "last_error": "",
-                }
-                parts.upsert_partition(row, patch)
+                parts.upsert_partition(
+                    row,
+                    {
+                        "endpoint": sub_ep.name,
+                        "proposicao_id": pid,
+                        "status": "QUEUED",
+                        "current_pipeline_run_id": pipeline_run_id,
+                        "last_pipeline_run_id": cur_pid,
+                        "last_dispatched_at": dispatched_at,
+                        "last_execution_id": execution_id,
+                        "attempt_count": int(state.get("attempt_count", 0) or 0),
+                        "last_error": "",
+                    },
+                )
                 enqueued_now += 1
 
-        # 3) Reconciliar contadores a partir do IngestionState.
         pc = parts.count_statuses_by_run(pipeline_run_id)
         total_seen = (
             pc["queued"]
@@ -356,15 +399,32 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             + pc["stale"]
             + pc["other"]
         )
-        # Each detected proposicao yields 2 sub-tasks.
-        total_expected = max(len(detected_ids) * 2, total_seen)
-        enqueue_phase_complete = (
-            list_pages_written > 0
-            and enqueued_now == 0
-            and skipped_already_queued == 0
-            and total_seen >= len(detected_ids) * 2
-        )
+        n_ids = len(all_ids)
+        total_expected = max(n_ids * 2, total_seen)
+
+        if not listing_complete:
+            enqueue_phase_complete = False
+        elif n_ids == 0:
+            enqueue_phase_complete = True
+        else:
+            enqueue_phase_complete = (
+                enqueued_now == 0
+                and skipped_already_queued == 0
+                and total_seen >= n_ids * 2
+            )
+
         if (
+            enqueue_phase_complete
+            and total_expected == 0
+            and pc["failed"] == 0
+            and pc["poison"] == 0
+            and pc["running"] == 0
+            and pc["queued"] == 0
+            and pc["pending"] == 0
+        ):
+            run_status_final = "COMPLETED"
+            finished_at_utc = datetime.now(UTC).isoformat()
+        elif (
             enqueue_phase_complete
             and total_expected > 0
             and pc["success"] >= total_expected
@@ -388,7 +448,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 "pipeline_run_id": pipeline_run_id,
                 "status": run_status_final,
                 "enqueue_phase_complete": enqueue_phase_complete,
-                "total_proposicoes_detected": len(detected_ids),
+                "total_proposicoes_detected": n_ids,
                 "total_tasks_expected": total_expected,
                 "total_tasks_queued": pc["queued"],
                 "total_tasks_success": pc["success"],
@@ -396,26 +456,24 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 "total_tasks_pending": pc["pending"],
                 "total_tasks_poison": pc["poison"],
                 "total_tasks_running": pc["running"],
-                "list_pages_written": list_pages_written,
-                "list_records_collected": list_records_collected,
+                "list_pages_written": total_list_pages,
+                "list_records_collected": total_list_recs,
                 "window_start_utc": window_start.isoformat(),
                 "window_end_utc": window_end.isoformat(),
-                "api_date_start": date_start,
-                "api_date_end": date_end,
+                "recon_listing_complete": listing_complete,
             }
         )
 
-        # 4) Manifest agregado + _SUCCESS quando estritamente concluído.
         agg_meta = build_proposicoes_dispatcher_run_metadata(
             pipeline_run_id=pipeline_run_id,
-            mode="microbatch",
+            mode="reconciliation",
             status=run_status_final,
             started_at_utc=started_at,
             finished_at_utc=finished_at_utc,
             failed_at_utc=None,
             window_start_utc=window_start.isoformat(),
             window_end_utc=window_end.isoformat(),
-            total_proposicoes_detected=len(detected_ids),
+            total_proposicoes_detected=n_ids,
             total_tasks_expected=total_expected,
             total_tasks_queued=pc["queued"],
             total_tasks_pending=pc["pending"],
@@ -429,9 +487,9 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             source_system=domain.source_system,
             hash_strategy=domain.hash_strategy,
             audit_fields_applied=domain.audit_fields,
-            total_raw_files_written=list_pages_written,
-            total_records_collected=list_records_collected,
-            manifest_extras=manifest_extras_common,
+            total_raw_files_written=total_list_pages,
+            total_records_collected=total_list_recs,
+            manifest_extras=extras_base,
         )
         persist_proposicoes_run_metadata(
             raw_writer,
@@ -443,34 +501,22 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         log_structured(
             logger,
             "info",
-            "Proposicoes dispatch tick finished.",
+            "Proposicoes reconciliation tick finished.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
             date_start=date_start,
             date_end=date_end,
-            microbatch_lookback_days=lookback_days,
-            window_start_utc=window_start.isoformat(),
-            window_end_utc=window_end.isoformat(),
-            list_pages_written=list_pages_written,
-            list_records_collected=list_records_collected,
-            total_detected=len(detected_ids),
-            total_expected=total_expected,
+            listing_complete=listing_complete,
+            total_detected=n_ids,
             enqueued_now=enqueued_now,
-            skipped_already_queued=skipped_already_queued,
-            skipped_already_success=skipped_already_success,
-            total_tasks_success=pc["success"],
-            total_tasks_failed=pc["failed"],
-            total_tasks_running=pc["running"],
-            total_tasks_queued=pc["queued"],
             run_status_final=run_status_final,
-            enqueue_phase_complete=enqueue_phase_complete,
         )
     except Exception as exc:
         failed_at = datetime.now(UTC).isoformat()
         log_structured(
             logger,
             "error",
-            "Proposicoes dispatcher failed.",
+            "Proposicoes reconciliation failed.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
             error=str(exc)[:500],
@@ -482,47 +528,8 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     "pipeline_run_id": pipeline_run_id,
                     "status": "FAILED" if enqueued_now == 0 else "PARTIAL",
                     "last_error": f"{type(exc).__name__}: {str(exc)[:512]}",
-                    "error_type": type(exc).__name__,
                     "failed_at": failed_at,
                 }
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            failed_meta = build_proposicoes_dispatcher_run_metadata(
-                pipeline_run_id=pipeline_run_id,
-                mode="microbatch",
-                status="FAILED",
-                started_at_utc=started_at,
-                finished_at_utc=None,
-                failed_at_utc=failed_at,
-                window_start_utc=window_start.isoformat(),
-                window_end_utc=window_end.isoformat(),
-                total_proposicoes_detected=len(detected_ids),
-                total_tasks_expected=len(detected_ids) * 2,
-                total_tasks_queued=0,
-                total_tasks_pending=0,
-                total_tasks_success=0,
-                total_tasks_failed=0,
-                total_tasks_poison=0,
-                total_tasks_running=0,
-                enqueue_phase_complete=False,
-                sub_endpoints=_SUB_ENDPOINTS,
-                error_type=type(exc).__name__,
-                error_message=str(exc)[:1024],
-                api_base_url=domain.api_base_url,
-                source_system=domain.source_system,
-                hash_strategy=domain.hash_strategy,
-                audit_fields_applied=domain.audit_fields,
-                total_raw_files_written=list_pages_written,
-                total_records_collected=list_records_collected,
-                manifest_extras=manifest_extras_common,
-            )
-            persist_proposicoes_run_metadata(
-                raw_writer,
-                pipeline_run_id,
-                failed_meta,
-                write_success_marker_now=False,
             )
         except Exception:  # noqa: BLE001
             pass

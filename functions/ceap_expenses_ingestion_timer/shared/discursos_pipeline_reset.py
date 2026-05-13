@@ -3,6 +3,10 @@
 Mirrors :mod:`shared.eventos_pipeline_reset` but scoped to the discursos
 domain. Guarded by either ``ENABLE_RESET_FUNCTIONS=true`` or
 ``ENABLE_DISCURSOS_RESET_FUNCTION=true``.
+
+Includes ``deputies_snapshot/`` (dispatcher /deputados listing for microbatch and
+reconciliation) and ``discursos/`` plus ``_metadata/`` (aggregate run and
+``discovered_fingerprints.json``).
 """
 
 from __future__ import annotations
@@ -269,7 +273,11 @@ def run_discursos_pipeline_reset(
         needle_run = f"pipeline_run_id={pipeline_run_id}"
         needle_safe = f"pipeline_run_id={pr_safe}"
         prefixes = [
+            # Per-deputado discursos pages + manifests
             "raw/camara/discursos/api/discursos/",
+            # Dispatcher deputies listing (microbatch + reconciliation resume)
+            "raw/camara/discursos/api/deputies_snapshot/",
+            # Aggregate run metadata + discovered_fingerprints.json (reconciliation)
             "raw/camara/discursos/api/_metadata/",
         ]
         for base_prefix in prefixes:

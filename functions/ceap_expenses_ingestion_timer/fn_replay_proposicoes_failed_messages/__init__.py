@@ -8,7 +8,9 @@ Query params:
 * ``proposicao_id``: optional filter (single proposicao id)
 * ``pipeline_run_id``: optional filter (will scope replay to that run)
 * ``new_pipeline_run_id``: optional override; defaults to existing run id
-  when filter is provided, otherwise ``proposicoes_replay_YYYYMMDD``.
+  when filter is provided, otherwise ``proposicoes_replay_YYYYMMDD``. When the
+  effective target id is a microbatch or reconciliation run, ``run_type`` on
+  queued messages matches it; synthetic replay ids use ``manual_replay``.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from shared.generic_partition_state import GenericPartitionStateStore
 from shared.logger import get_logger, log_structured
 from shared.queue_helpers import send_json_message
 from shared.queue_messages import DomainWorkMessage
+from shared.replay_run_type import infer_run_type_for_requeued_work
 
 logger = get_logger()
 
@@ -88,7 +91,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 domain=domain.name,
                 endpoint=ep_name,
                 pipeline_run_id=default_run,
-                run_type="manual_replay",
+                run_type=infer_run_type_for_requeued_work(default_run),
                 payload={"proposicao_id": pid_p},
                 execution_id=execution_id,
                 dispatched_at=now.isoformat(),

@@ -37,7 +37,12 @@ RunStatus = Literal[
     "NO_DATA",
 ]
 RunType = Literal[
-    "snapshot", "daily", "reconciliation", "backfill", "manual_replay"
+    "snapshot",
+    "daily",
+    "microbatch",
+    "reconciliation",
+    "backfill",
+    "manual_replay",
 ]
 SnapshotType = Literal["dimension", "fact_window"]
 
