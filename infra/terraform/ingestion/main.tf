@@ -187,7 +187,7 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "CEAP_API_YEAR"            = "2026"
     "CEAP_TARGET_YEAR"         = "2026"
     "CEAP_RECONCILIATION_DAY"  = "25"
-    "CEAP_DAILY_LOOKBACK_MONTHS" = "1"
+    "CEAP_DAILY_LOOKBACK_MONTHS" = "0"
     "CEAP_STALE_AFTER_MINUTES" = "60"
     "CEAP_REFERENCE_TIMEZONE"  = "America/Sao_Paulo"
     "CEAP_RECONCILIATION_START_MONTH" = "1"
@@ -224,8 +224,8 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "ENABLE_MANUAL_RECONCILIATION_FUNCTIONS" = var.enable_manual_votacoes_reconciliation_function ? "true" : "false"
 
     # ----- Proposicoes domain ----------------------------------------------
-    "PROPOSICOES_DISPATCH_SCHEDULE"        = var.proposicoes_dispatch_schedule
-    "PROPOSICOES_DISPATCH_GRANULARITY_MIN" = tostring(var.proposicoes_dispatch_granularity_min)
+    "PROPOSICOES_DAILY_DISPATCH_SCHEDULE"             = var.proposicoes_daily_dispatch_schedule
+    "PROPOSICOES_RECONCILIATION_DISPATCH_SCHEDULE"   = var.proposicoes_reconciliation_dispatch_schedule
     "PROPOSICOES_LOOKBACK_MINUTES"         = tostring(var.proposicoes_lookback_minutes)
     "PROPOSICOES_MICROBATCH_LOOKBACK_DAYS" = tostring(var.proposicoes_microbatch_lookback_days)
     "PROPOSICOES_QUEUE_NAME"               = azurerm_storage_queue.proposicoes_work.name
@@ -238,19 +238,17 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "ENABLE_PROPOSICOES_RESET_FUNCTION"    = var.enable_proposicoes_reset_function ? "true" : "false"
 
     # ----- Eventos domain ---------------------------------------------------
-    "EVENTOS_DISPATCH_SCHEDULE"        = var.eventos_dispatch_schedule
-    "EVENTOS_DISPATCH_GRANULARITY_MIN" = tostring(var.eventos_dispatch_granularity_min)
-    "EVENTOS_LOOKBACK_MINUTES"         = tostring(var.eventos_lookback_minutes)
+    "EVENTOS_DAILY_DISPATCH_SCHEDULE"             = var.eventos_daily_dispatch_schedule
+    "EVENTOS_RECONCILIATION_DISPATCH_SCHEDULE"    = var.eventos_reconciliation_dispatch_schedule
+    "EVENTOS_DAILY_FUTURE_DAYS"                   = tostring(var.eventos_daily_future_days)
+    "EVENTOS_RECONCILIATION_PAST_DAYS"            = tostring(var.eventos_reconciliation_past_days)
+    "EVENTOS_RECONCILIATION_FUTURE_DAYS"          = tostring(var.eventos_reconciliation_future_days)
     "EVENTOS_QUEUE_NAME"               = azurerm_storage_queue.eventos_work.name
     "EVENTOS_POISON_QUEUE_NAME"        = azurerm_storage_queue.eventos_poison.name
     "EVENTOS_LOCK_TTL_MINUTES"         = tostring(var.eventos_lock_ttl_minutes)
     "EVENTOS_MAX_MESSAGES_PER_TICK"    = tostring(var.eventos_max_messages_per_tick)
     "EVENTOS_MAX_LIST_PAGES"           = tostring(var.eventos_max_list_pages)
-    "EVENTOS_RECONCILIATION_DAY"       = tostring(var.eventos_reconciliation_day)
-    "EVENTOS_RECONCILIATION_LOOKBACK_DAYS" = tostring(var.eventos_reconciliation_lookback_days)
     "EVENTOS_RECON_MAX_PAGES_PER_TICK" = tostring(var.eventos_recon_max_pages_per_tick)
-    "EVENTOS_MICROBATCH_PAST_DAYS"     = tostring(var.eventos_microbatch_past_days)
-    "EVENTOS_MICROBATCH_FUTURE_DAYS"   = tostring(var.eventos_microbatch_future_days)
     "ENABLE_EVENTOS_RESET_FUNCTION"    = var.enable_eventos_reset_function ? "true" : "false"
 
     # ----- Institucional domain --------------------------------------------

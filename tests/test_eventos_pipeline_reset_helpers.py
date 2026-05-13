@@ -17,6 +17,10 @@ def test_microbatch_run_id_format_is_accepted() -> None:
     assert is_allowed_eventos_pipeline_run_id("eventos_microbatch_202605112230")
 
 
+def test_daily_run_id_format_is_accepted() -> None:
+    assert is_allowed_eventos_pipeline_run_id("eventos_daily_20260511")
+
+
 def test_reconciliation_run_id_format_is_accepted() -> None:
     assert is_allowed_eventos_pipeline_run_id("eventos_reconciliation_20260511")
 
@@ -37,6 +41,8 @@ def test_invalid_run_ids_are_rejected() -> None:
     assert not is_allowed_eventos_pipeline_run_id("")
     assert not is_allowed_eventos_pipeline_run_id("eventos_microbatch_")
     assert not is_allowed_eventos_pipeline_run_id("eventos_microbatch_2026")
+    assert not is_allowed_eventos_pipeline_run_id("eventos_daily_")
+    assert not is_allowed_eventos_pipeline_run_id("eventos_daily_2026")
     assert not is_allowed_eventos_pipeline_run_id("eventos_other_20260511")
 
 
@@ -44,6 +50,7 @@ def test_safe_path_segment_replaces_unsafe_chars() -> None:
     assert safe_path_segment("eventos_microbatch_202605112230") == (
         "eventos_microbatch_202605112230"
     )
+    assert safe_path_segment("eventos_daily_20260511") == "eventos_daily_20260511"
     assert safe_path_segment("../etc/passwd") == ".._etc_passwd"
 
 

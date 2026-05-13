@@ -16,6 +16,7 @@ from shared.domain_catalog import (
     VOTACOES_DOMAIN,
     discursos_microbatch_run_id,
     discursos_reconciliation_run_id,
+    eventos_daily_run_id,
     eventos_microbatch_run_id,
     eventos_reconciliation_run_id,
     get_domain,
@@ -23,6 +24,7 @@ from shared.domain_catalog import (
     institucional_reconciliation_run_id,
     is_well_formed_pipeline_run_id,
     list_domains,
+    proposicoes_daily_run_id,
     proposicoes_microbatch_run_id,
     proposicoes_reconciliation_run_id,
     reference_run_id_for_date,
@@ -142,6 +144,12 @@ def test_proposicoes_endpoints_cover_list_autores_tramitacoes() -> None:
     assert tramitacoes.business_key_fields == ("sequencia", "dataHora")
 
 
+def test_proposicoes_daily_run_id_format() -> None:
+    pid = proposicoes_daily_run_id("2026-05-11")
+    assert pid == "proposicoes_daily_20260511"
+    assert PROPOSICOES_DOMAIN.is_pipeline_run_id_owned_here(pid)
+
+
 def test_proposicoes_microbatch_run_id_is_idempotent_per_minute() -> None:
     pid_a = proposicoes_microbatch_run_id("2026-05-11T22:30")
     pid_b = proposicoes_microbatch_run_id("2026-05-11T22:30")
@@ -181,6 +189,13 @@ def test_eventos_endpoints_cover_list_and_4_subendpoints() -> None:
     assert pauta.parent_field == "id"
     # Pauta items use compound business key (ordem + nested proposicao_.id).
     assert pauta.business_key_fields == ("ordem", "proposicao_.id")
+
+
+def test_eventos_daily_run_id_is_idempotent_per_date() -> None:
+    pid_a = eventos_daily_run_id("2026-05-11")
+    pid_b = eventos_daily_run_id("2026-05-11")
+    assert pid_a == pid_b == "eventos_daily_20260511"
+    assert EVENTOS_DOMAIN.is_pipeline_run_id_owned_here(pid_a)
 
 
 def test_eventos_microbatch_run_id_is_idempotent_per_minute() -> None:

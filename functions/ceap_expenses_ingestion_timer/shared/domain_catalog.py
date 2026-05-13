@@ -40,8 +40,14 @@ DEFAULT_MAX_TASKS_PER_DISPATCH = 1000
 SCHEDULE_EVERY_10_MIN = "0 */10 * * * *"
 SCHEDULE_EVERY_20_MIN = "0 */20 * * * *"
 SCHEDULE_DAILY_AT_06_UTC = "0 0 6 * * *"
-# Votações microbatch: every 10 minutes, Monday–Friday (UTC) — see Terraform override.
-SCHEDULE_VOTACOES_MICROBATCH_WEEKDAYS = "0 */10 * * * 1-5"
+# Proposições: daily list at 06:15 UTC; weekly reconciliation timer (Sunday 06:30 UTC).
+SCHEDULE_DAILY_AT_06_15_UTC = "0 15 6 * * *"
+SCHEDULE_WEEKLY_SUNDAY_06_30_UTC = "0 30 6 * * 0"
+# Votações microbatch: every 10 minutes (UTC), all days — override in Terraform if needed.
+SCHEDULE_VOTACOES_MICROBATCH = "0 */10 * * * *"
+# Eventos: daily list 07:15 UTC; weekly reconciliation Sunday 08:15 UTC.
+SCHEDULE_EVENTOS_DAILY = "0 15 7 * * *"
+SCHEDULE_EVENTOS_RECONCILIATION = "0 15 8 * * 0"
 
 # Default microbatch lookback (votacoes): how far back the dispatcher scans on
 # every tick (overlap with the previous tick provides safety net for late
@@ -193,8 +199,9 @@ REFERENCE_DOMAIN = DomainSpec(
 VOTACOES_DOMAIN = DomainSpec(
     name="votacoes",
     description=(
-        "Votações: microbatch (janela recente) + reconciliação mensal; fanout "
-        "para /votacoes/{id}/votos (um worker por votação)."
+        "Votações: microbatch (janela curta + ordenação por id + cursor global "
+        "last_processed_votacao_id) + reconciliação mensal; fanout para "
+        "/votacoes/{id}/votos."
     ),
     pipeline_run_id_prefixes=(
         "votacoes_microbatch_",
@@ -207,7 +214,7 @@ VOTACOES_DOMAIN = DomainSpec(
     runs_partition_key="_runs",
     locks_partition_key="_locks",
     lock_row_key="votacoes_dispatcher_lock",
-    schedule_cron=SCHEDULE_VOTACOES_MICROBATCH_WEEKDAYS,
+    schedule_cron=SCHEDULE_VOTACOES_MICROBATCH,
     endpoints=(
         EndpointSpec(
             name="votacoes",
@@ -238,16 +245,18 @@ VOTACOES_DOMAIN = DomainSpec(
 )
 
 
-# --- Proposições (microbatch + fanout para autores e tramitações) -----------
+# --- Proposições (daily list + weekly recon + fanout para autores e tramitações)
 PROPOSICOES_DOMAIN = DomainSpec(
     name="proposicoes",
     description=(
-        "Proposições: lista por janela (microbatch sobre dataInicio/dataFim "
-        "= última atualização de tramitação) e fanout para "
-        "/proposicoes/{id}/autores e /proposicoes/{id}/tramitacoes."
+        "Proposições: janela diária (dataInicio/dataFim na API) + fanout para "
+        "/proposicoes/{id}/autores e /proposicoes/{id}/tramitacoes; reconciliação "
+        "semanal (mês atual + anterior). Idempotência técnica via hash da linha "
+        "da lista em Table Storage (last_list_item_hash)."
     ),
     pipeline_run_id_prefixes=(
         "proposicoes_microbatch_",
+        "proposicoes_daily_",
         "proposicoes_reconciliation_",
     ),
     queue_work="proposicoes-api-work",
@@ -256,7 +265,7 @@ PROPOSICOES_DOMAIN = DomainSpec(
     runs_partition_key="_runs_proposicoes",
     locks_partition_key="_locks_proposicoes",
     lock_row_key="proposicoes_dispatcher_lock",
-    schedule_cron=SCHEDULE_EVERY_20_MIN,
+    schedule_cron=SCHEDULE_DAILY_AT_06_15_UTC,
     endpoints=(
         EndpointSpec(
             name="proposicoes",
@@ -293,14 +302,15 @@ PROPOSICOES_DOMAIN = DomainSpec(
 )
 
 
-# --- Eventos (microbatch + fanout para 4 sub-endpoints) ---------------------
+# --- Eventos (daily list + weekly recon + fanout para 4 sub-endpoints) -----
 EVENTOS_DOMAIN = DomainSpec(
     name="eventos",
     description=(
-        "Eventos: lista por janela (microbatch sobre dataInicio/dataFim) e "
-        "fanout para /eventos/{id}/{deputados,orgaos,pauta,votacoes}."
+        "Eventos: lista diária por janela (UTC) em /eventos e fanout para "
+        "/eventos/{id}/{deputados,orgaos,pauta,votacoes}; recon semanal larga."
     ),
     pipeline_run_id_prefixes=(
+        "eventos_daily_",
         "eventos_microbatch_",
         "eventos_reconciliation_",
     ),
@@ -310,7 +320,7 @@ EVENTOS_DOMAIN = DomainSpec(
     runs_partition_key="_runs_eventos",
     locks_partition_key="_locks_eventos",
     lock_row_key="eventos_dispatcher_lock",
-    schedule_cron=SCHEDULE_EVERY_20_MIN,
+    schedule_cron=SCHEDULE_EVENTOS_DAILY,
     endpoints=(
         EndpointSpec(
             name="eventos",
@@ -589,6 +599,14 @@ def votacoes_reconciliation_run_id(reference_date: str) -> str:
     return f"votacoes_reconciliation_{compact}"
 
 
+def proposicoes_daily_run_id(reference_date_ymd: str) -> str:
+    """``proposicoes_daily_YYYYMMDD`` — one canonical run id per UTC calendar day."""
+    compact = (reference_date_ymd or "").replace("-", "").strip()
+    if len(compact) != 8 or not compact.isdigit():
+        raise ValueError(f"Invalid reference_date_ymd for daily run id: {reference_date_ymd!r}")
+    return f"proposicoes_daily_{compact}"
+
+
 def proposicoes_microbatch_run_id(reference_minute_utc: str) -> str:
     """``proposicoes_microbatch_YYYYMMDDHHMM`` (idempotent per minute)."""
     raw = (reference_minute_utc or "").strip()
@@ -616,6 +634,14 @@ def eventos_microbatch_run_id(reference_minute_utc: str) -> str:
     if len(compact) < 12:
         raise ValueError("reference_minute_utc must include minute")
     return f"eventos_microbatch_{compact[:12]}"
+
+
+def eventos_daily_run_id(reference_date: str) -> str:
+    """``eventos_daily_YYYYMMDD`` — one canonical run id per UTC calendar day."""
+    compact = (reference_date or "").replace("-", "")
+    if len(compact) != 8 or not compact.isdigit():
+        raise ValueError("reference_date must be YYYY-MM-DD")
+    return f"eventos_daily_{compact}"
 
 
 def eventos_reconciliation_run_id(reference_date: str) -> str:

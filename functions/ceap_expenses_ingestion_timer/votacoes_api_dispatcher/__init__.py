@@ -1,17 +1,16 @@
-"""Timer: votações API dispatcher — microbatch (seg–sex UTC) + reconciliação mensal.
+"""Timer: votações API dispatcher — microbatch (10 em 10 min, UTC) + reconciliação mensal.
 
-* **Microbatch** (dias úteis): ``votacoes_microbatch_YYYYMMDDHHmm``, janela
-  ``VOTACOES_MICROBATCH_SAFETY_WINDOW_HOURS`` (48h por defeito).
-* **Reconciliação** (dia ``VOTACOES_RECONCILIATION_DAY``, UTC): único
-  ``votacoes_reconciliation_YYYYMMDD`` por dia, varre ``TARGET_YEAR``-01-01 até
-  hoje, com retoma paginada entre ticks e ``discovered_fingerprints.json`` no
-  ADLS para fan-out incremental.
+* **Microbatch**: ``votacoes_microbatch_YYYYMMDDHHmm``, janela curta em dias
+  (``VOTACOES_MICROBATCH_DATE_WINDOW_DAYS``, default 2), listagem ``ordenarPor=id``
+  ASC e cursor global ``last_processed_votacao_id`` (Table) avançado só pelo worker.
+* **Reconciliação** (dia ``VOTACOES_RECONCILIATION_DAY``, UTC): ``votacoes_reconciliation_YYYYMMDD``,
+  varre ``TARGET_YEAR``-01-01 até hoje, com retoma paginada e ``discovered_fingerprints.json``.
 """
 
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 
 import azure.functions as func
 
@@ -45,7 +44,10 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         window_end = now
         run_type_label = "reconciliation"
     else:
-        if now.weekday() >= 5:
+        skip_weekend = str(
+            os.getenv("VOTACOES_SKIP_WEEKEND_MICROBATCH", "")
+        ).lower() in ("1", "true", "yes")
+        if skip_weekend and now.weekday() >= 5:
             log_structured(
                 logger,
                 "info",
@@ -57,11 +59,15 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         mode = "microbatch"
         anchor = _round_minute_down(now, granularity)
         pipeline_run_id = votacoes_microbatch_run_id(anchor.strftime("%Y-%m-%dT%H:%M"))
-        safety_hours = max(1, int(os.getenv("VOTACOES_MICROBATCH_SAFETY_WINDOW_HOURS", "48")))
+        window_days = max(
+            1, int(os.getenv("VOTACOES_MICROBATCH_DATE_WINDOW_DAYS", "2"))
+        )
         window_end = now
-        window_start = window_end - timedelta(hours=safety_hours)
-        date_start = window_start.date().isoformat()
-        date_end = window_end.date().isoformat()
+        date_end_d = now.date()
+        date_start_d = date_end_d - timedelta(days=window_days - 1)
+        date_start = date_start_d.isoformat()
+        date_end = date_end_d.isoformat()
+        window_start = datetime.combine(date_start_d, time.min, tzinfo=UTC)
         run_type_label = "microbatch"
 
     conn = os.environ["AzureWebJobsStorage"]

@@ -87,3 +87,32 @@ def months_reconciliation_window(
         return []
     sm = max(1, min(12, int(start_month)))
     return list(range(sm, max_m + 1))
+
+
+def months_reconciliation_current_and_previous(
+    *, target_year: int, now: datetime
+) -> list[int]:
+    """Reconciliation: **previous calendar month + current month** within ``target_year``.
+
+    Used for low-cost weekly-style CEAP reconciliation (same legislative year only).
+    If ``now.month == 1``, only January is returned (no month 0 in the same year).
+    Months are returned **ascending** (older first) for stable processing order.
+    """
+    max_m = max_dispatch_month(target_year=target_year, now=now)
+    if max_m < 1:
+        return []
+    if target_year > now.year:
+        return []
+    if target_year < now.year:
+        # Historical closed year: still only last two "active" months at year end.
+        cm = 12
+        prev_m = cm - 1
+        return [m for m in (prev_m, cm) if 1 <= m <= max_m]
+
+    cm = min(now.month, max_m)
+    prev_m = cm - 1
+    out: list[int] = []
+    if prev_m >= 1:
+        out.append(prev_m)
+    out.append(cm)
+    return [m for m in out if 1 <= m <= max_m]

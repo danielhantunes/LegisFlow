@@ -1,4 +1,4 @@
-"""Monthly / manual reconciliation tick for eventos (short lookback window)."""
+"""Weekly / manual reconciliation tick for eventos (wide ``/eventos`` date window)."""
 
 from __future__ import annotations
 
@@ -159,7 +159,7 @@ def execute_eventos_reconciliation_tick(
 
     enqueued_now = 0
     skipped_already_queued = 0
-    skipped_already_success = 0
+    skipped_same_list_hash = 0
     list_pages_this_tick = 0
     list_recs_this_tick = 0
 
@@ -213,6 +213,12 @@ def execute_eventos_reconciliation_tick(
             "date_end": date_end,
             "reconciliation_day": recon_day,
             "reconciliation_lookback_days": lookback_days,
+            "reconciliation_past_days": int(
+                os.getenv("EVENTOS_RECONCILIATION_PAST_DAYS", "7")
+            ),
+            "reconciliation_future_days": int(
+                os.getenv("EVENTOS_RECONCILIATION_FUTURE_DAYS", "30")
+            ),
         }
         running_meta = build_eventos_dispatcher_run_metadata(
             pipeline_run_id=pipeline_run_id,
@@ -336,6 +342,8 @@ def execute_eventos_reconciliation_tick(
         for eid in all_ids:
             if enqueued_now >= max_messages_per_tick:
                 break
+            fp = fingerprints.get(eid) or {}
+            list_hash = str(fp.get("hash") or "")
             for sub_ep in sub_endpoints:
                 if enqueued_now >= max_messages_per_tick:
                     break
@@ -343,11 +351,13 @@ def execute_eventos_reconciliation_tick(
                 state = parts.get_partition(row) or {}
                 cur_pid = str(state.get("current_pipeline_run_id", "") or "")
                 cur_status = str(state.get("status", "")).upper()
-                if cur_pid == pipeline_run_id and cur_status == "SUCCESS":
-                    skipped_already_success += 1
-                    continue
                 if cur_pid == pipeline_run_id and cur_status in ("QUEUED", "RUNNING"):
                     skipped_already_queued += 1
+                    continue
+                if cur_status == "SUCCESS" and list_hash and str(
+                    state.get("last_list_item_hash") or ""
+                ) == list_hash:
+                    skipped_same_list_hash += 1
                     continue
                 execution_id = str(uuid.uuid4())
                 dispatched_at = datetime.now(UTC).isoformat()
@@ -360,6 +370,7 @@ def execute_eventos_reconciliation_tick(
                         "evento_id": eid,
                         "window_start_utc": window_start.isoformat(),
                         "window_end_utc": window_end.isoformat(),
+                        "list_item_hash": list_hash,
                     },
                     execution_id=execution_id,
                     dispatched_at=dispatched_at,
@@ -402,6 +413,11 @@ def execute_eventos_reconciliation_tick(
         )
         n_ids = len(all_ids)
         total_expected = max(n_ids * _SUB_COUNT, total_seen)
+        fanout_target = n_ids * _SUB_COUNT
+        fanout_decisions = (
+            enqueued_now + skipped_already_queued + skipped_same_list_hash
+        )
+        hit_cap = enqueued_now >= max_messages_per_tick
 
         if not listing_complete:
             enqueue_phase_complete = False
@@ -409,10 +425,17 @@ def execute_eventos_reconciliation_tick(
             enqueue_phase_complete = True
         else:
             enqueue_phase_complete = (
-                enqueued_now == 0
+                not hit_cap
+                and fanout_decisions >= fanout_target
+                and enqueued_now == 0
                 and skipped_already_queued == 0
-                and total_seen >= n_ids * _SUB_COUNT
             )
+
+        all_subtasks_skipped_hash = (
+            enqueue_phase_complete
+            and fanout_target > 0
+            and skipped_same_list_hash >= fanout_target
+        )
 
         if (
             enqueue_phase_complete
@@ -422,7 +445,7 @@ def execute_eventos_reconciliation_tick(
             and pc["running"] == 0
             and pc["queued"] == 0
             and pc["pending"] == 0
-        ):
+        ) or all_subtasks_skipped_hash:
             run_status_final = "COMPLETED"
             finished_at_utc = datetime.now(UTC).isoformat()
         elif (
@@ -509,6 +532,7 @@ def execute_eventos_reconciliation_tick(
             listing_complete=listing_complete,
             total_detected=n_ids,
             enqueued_now=enqueued_now,
+            skipped_same_list_hash=skipped_same_list_hash,
             run_status_final=run_status_final,
         )
     except Exception as exc:
@@ -537,16 +561,3 @@ def execute_eventos_reconciliation_tick(
     finally:
         registry.release_dispatcher_lock(lock_token)
         _ = raw_account
-
-
-def default_eventos_reconciliation_window(
-    *, now: datetime, lookback_days: int
-) -> tuple[str, str]:
-    """UTC calendar dates for /eventos list (inclusive)."""
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=UTC)
-    else:
-        now = now.astimezone(UTC)
-    end_d = now.date()
-    start_d = end_d - timedelta(days=max(0, lookback_days - 1))
-    return start_d.isoformat(), end_d.isoformat()

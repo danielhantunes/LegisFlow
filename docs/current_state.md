@@ -17,8 +17,8 @@ Cada domínio (exceto CEAP “clássico”) segue o padrão: **dispatcher (timer
 | **CEAP** (`ceap`) | `ceap_api_2026_dispatcher` | `ceap_api_2026_worker` | `ceap_api_2026_poison_handler` | `fn_replay_ceap_failed_messages` | `fn_reset_ceap_pipeline_run` |
 | **reference** | `reference_snapshot_dispatcher` | `reference_snapshot_worker` | `reference_snapshot_poison_handler` | `fn_replay_reference_failed_messages` | `fn_reset_reference_pipeline_run` |
 | **votacoes** | `votacoes_dispatcher` | `votacoes_worker` | `votacoes_poison_handler` | `fn_replay_votacoes_failed_messages` | `fn_reset_votacoes_pipeline_run` |
-| **proposicoes** | `proposicoes_dispatcher` | `proposicoes_worker` | `proposicoes_poison_handler` | `fn_replay_proposicoes_failed_messages` | `fn_reset_proposicoes_pipeline_run` |
-| **eventos** | `eventos_dispatcher` | `eventos_worker` | `eventos_poison_handler` | `fn_replay_eventos_failed_messages` | `fn_reset_eventos_pipeline_run` |
+| **proposicoes** | `proposicoes_daily_dispatcher`, `proposicoes_reconciliation_dispatcher` | `proposicoes_worker` | `proposicoes_poison_handler` | `fn_replay_proposicoes_failed_messages` | `fn_reset_proposicoes_pipeline_run` |
+| **eventos** | `eventos_daily_dispatcher`, `eventos_reconciliation_dispatcher` | `eventos_worker` | `eventos_poison_handler` | `fn_replay_eventos_failed_messages` | `fn_reset_eventos_pipeline_run` |
 | **institucional** | `institucional_dispatcher` | `institucional_worker` | `institucional_poison_handler` | `fn_replay_institucional_failed_messages` | `fn_reset_institucional_pipeline_run` |
 | **discursos** | `discursos_dispatcher` | `discursos_worker` | `discursos_poison_handler` | `fn_replay_discursos_failed_messages` | `fn_reset_discursos_pipeline_run` |
 

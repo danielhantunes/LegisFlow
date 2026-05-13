@@ -158,7 +158,7 @@ def execute_proposicoes_reconciliation_tick(
 
     enqueued_now = 0
     skipped_already_queued = 0
-    skipped_already_success = 0
+    skipped_same_list_hash = 0
     list_pages_this_tick = 0
     list_recs_this_tick = 0
 
@@ -342,11 +342,14 @@ def execute_proposicoes_reconciliation_tick(
                 state = parts.get_partition(row) or {}
                 cur_pid = str(state.get("current_pipeline_run_id", "") or "")
                 cur_status = str(state.get("status", "")).upper()
-                if cur_pid == pipeline_run_id and cur_status == "SUCCESS":
-                    skipped_already_success += 1
-                    continue
+                list_fp = str((fingerprints.get(pid) or {}).get("hash") or "")
                 if cur_pid == pipeline_run_id and cur_status in ("QUEUED", "RUNNING"):
                     skipped_already_queued += 1
+                    continue
+                if cur_status == "SUCCESS" and list_fp and str(
+                    state.get("last_list_item_hash") or ""
+                ) == list_fp:
+                    skipped_same_list_hash += 1
                     continue
                 execution_id = str(uuid.uuid4())
                 dispatched_at = datetime.now(UTC).isoformat()
@@ -359,6 +362,7 @@ def execute_proposicoes_reconciliation_tick(
                         "proposicao_id": pid,
                         "window_start_utc": window_start.isoformat(),
                         "window_end_utc": window_end.isoformat(),
+                        "list_item_hash": list_fp,
                     },
                     execution_id=execution_id,
                     dispatched_at=dispatched_at,
@@ -407,11 +411,23 @@ def execute_proposicoes_reconciliation_tick(
         elif n_ids == 0:
             enqueue_phase_complete = True
         else:
-            enqueue_phase_complete = (
-                enqueued_now == 0
-                and skipped_already_queued == 0
-                and total_seen >= n_ids * 2
+            fanout_target = n_ids * 2
+            fanout_decisions = (
+                enqueued_now + skipped_already_queued + skipped_same_list_hash
             )
+            hit_cap = enqueued_now >= max_messages_per_tick
+            enqueue_phase_complete = (
+                not hit_cap
+                and fanout_decisions >= fanout_target
+                and enqueued_now == 0
+                and skipped_already_queued == 0
+            )
+
+        all_subtasks_skipped_hash = (
+            enqueue_phase_complete
+            and n_ids > 0
+            and skipped_same_list_hash >= n_ids * 2
+        )
 
         if (
             enqueue_phase_complete
@@ -421,7 +437,7 @@ def execute_proposicoes_reconciliation_tick(
             and pc["running"] == 0
             and pc["queued"] == 0
             and pc["pending"] == 0
-        ):
+        ) or all_subtasks_skipped_hash:
             run_status_final = "COMPLETED"
             finished_at_utc = datetime.now(UTC).isoformat()
         elif (
@@ -464,6 +480,10 @@ def execute_proposicoes_reconciliation_tick(
             }
         )
 
+        extras_done = {
+            **extras_base,
+            "skipped_same_list_hash": skipped_same_list_hash,
+        }
         agg_meta = build_proposicoes_dispatcher_run_metadata(
             pipeline_run_id=pipeline_run_id,
             mode="reconciliation",
@@ -489,7 +509,7 @@ def execute_proposicoes_reconciliation_tick(
             audit_fields_applied=domain.audit_fields,
             total_raw_files_written=total_list_pages,
             total_records_collected=total_list_recs,
-            manifest_extras=extras_base,
+            manifest_extras=extras_done,
         )
         persist_proposicoes_run_metadata(
             raw_writer,
@@ -509,6 +529,7 @@ def execute_proposicoes_reconciliation_tick(
             listing_complete=listing_complete,
             total_detected=n_ids,
             enqueued_now=enqueued_now,
+            skipped_same_list_hash=skipped_same_list_hash,
             run_status_final=run_status_final,
         )
     except Exception as exc:

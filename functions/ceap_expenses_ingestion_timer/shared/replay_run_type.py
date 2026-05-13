@@ -12,6 +12,8 @@ def infer_run_type_for_requeued_work(pipeline_run_id: str) -> str:
     p = (pipeline_run_id or "").strip()
     if "_reconciliation_" in p:
         return "reconciliation"
+    if "_daily_" in p:
+        return "daily"
     if "_microbatch_" in p:
         return "microbatch"
     return "manual_replay"

@@ -9,10 +9,11 @@ import base64
 import json
 import re
 
+# Daily: ``eventos_daily_YYYYMMDD`` (8 trailing digits)
 # Microbatch: ``eventos_microbatch_YYYYMMDDHHMM`` (12 trailing digits)
 # Reconciliation: ``eventos_reconciliation_YYYYMMDD`` (8 trailing digits)
 _EVENTOS_RUN_RE = re.compile(
-    r"^eventos_(microbatch_\d{12}|reconciliation_\d{8})$"
+    r"^eventos_(daily_\d{8}|microbatch_\d{12}|reconciliation_\d{8})$"
 )
 
 

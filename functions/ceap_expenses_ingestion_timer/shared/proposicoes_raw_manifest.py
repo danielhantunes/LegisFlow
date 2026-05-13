@@ -126,6 +126,8 @@ def build_proposicoes_dispatcher_run_metadata(
         run_type_norm = "reconciliation"
     elif mode == "backfill":
         run_type_norm = "backfill"
+    elif mode == "daily":
+        run_type_norm = "daily"
     elif mode == "microbatch":
         run_type_norm = "microbatch"
     else:

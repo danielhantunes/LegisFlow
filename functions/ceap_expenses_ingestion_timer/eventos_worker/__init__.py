@@ -1,8 +1,9 @@
 """Queue trigger: eventos worker.
 
-Consumes one message from ``eventos_dispatcher``. The same worker handles all
+Consumes messages from ``eventos-api-work``. The same worker handles all
 4 sub-endpoints (deputados, orgaos, pauta, votacoes) — the endpoint name in
-the message decides which API path is fetched.
+the message decides which API path is fetched. Idempotent skip when
+``list_item_hash`` matches ``last_list_item_hash`` on a SUCCESS row.
 """
 
 from __future__ import annotations
@@ -103,6 +104,24 @@ def main(msg: func.QueueMessage) -> None:
 
     state_row = _state_row_key(endpoint.name, evento_id)
     state_now = parts.get_partition(state_row) or {}
+    list_hash = str((payload.get("list_item_hash") or "")).strip()
+    if (
+        str(state_now.get("status", "")).upper() == "SUCCESS"
+        and list_hash
+        and str(state_now.get("last_list_item_hash") or "") == list_hash
+    ):
+        log_structured(
+            logger,
+            "info",
+            "Eventos worker skipped: SUCCESS with unchanged list_item_hash.",
+            domain=domain.name,
+            endpoint=endpoint.name,
+            evento_id=evento_id,
+            pipeline_run_id=wm.pipeline_run_id,
+            dequeue_count=dequeue_count,
+        )
+        return
+
     same_run = (
         str(state_now.get("current_pipeline_run_id", "") or "")
         == wm.pipeline_run_id
@@ -215,6 +234,7 @@ def main(msg: func.QueueMessage) -> None:
                 "record_count": result.record_count,
                 "pages_written": result.pages_written,
                 "raw_path": result.last_raw_path,
+                "last_list_item_hash": list_hash,
                 "last_error": "",
             },
         )

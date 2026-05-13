@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -57,7 +58,7 @@ def test_completed_sub_snapshot_writes_pages_and_success(
         ]
     )
 
-    pid = "proposicoes_microbatch_202605112230"
+    pid = "proposicoes_daily_20260511"
     result = run_proposicao_sub_snapshot(
         domain=domain,
         endpoint=endpoint,
@@ -105,7 +106,7 @@ def test_each_page_carries_audit_envelope_with_parent_id(raw_writer) -> None:
         ]
     )
 
-    pid = "proposicoes_microbatch_202605112230"
+    pid = "proposicoes_daily_20260511"
     run_proposicao_sub_snapshot(
         domain=domain,
         endpoint=endpoint,
@@ -117,9 +118,11 @@ def test_each_page_carries_audit_envelope_with_parent_id(raw_writer) -> None:
         page_fetcher=fetcher,
     )
 
-    page_paths = [p for p in raw_writer.json_files if p.endswith("/page_1.json")]
-    assert len(page_paths) == 1
-    page = raw_writer.read_json(page_paths[0]) or {}
+    snap_paths = [p for p in raw_writer.files if p.endswith("/snapshot.jsonl")]
+    assert len(snap_paths) == 1
+    text = raw_writer.read_text(snap_paths[0]) or ""
+    line = text.strip().split("\n")[0]
+    page = json.loads(line)
     assert AUDIT_KEY in page
     assert page[AUDIT_KEY]["_pipeline_run_id"] == pid
     assert page[AUDIT_KEY]["_parent_id"] == "42"
@@ -150,7 +153,7 @@ def test_failed_sub_snapshot_writes_failed_metadata_and_no_success(
             )
         raise RuntimeError("simulated upstream failure")
 
-    pid = "proposicoes_microbatch_202605112230"
+    pid = "proposicoes_daily_20260511"
     result = run_proposicao_sub_snapshot(
         domain=domain,
         endpoint=endpoint,

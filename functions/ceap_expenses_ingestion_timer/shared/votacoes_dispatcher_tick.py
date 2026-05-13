@@ -21,6 +21,10 @@ from .queue_messages import DomainWorkMessage
 from .raw_audit import enrich_generic_page_payload
 from .run_registry import GenericRunRegistry
 from .votacoes_api_dispatcher_logic import list_item_uid_hash, reenqueue_stale_votacoes_tasks
+from .votacoes_microbatch_cursor import (
+    last_processed_votacao_id_int,
+    votacao_id_sort_key,
+)
 from .votacoes_raw_manifest import (
     VOTACOES_LIST_PREFIX,
     build_votacoes_dispatcher_run_metadata,
@@ -98,12 +102,12 @@ def execute_votacoes_ingestion_tick(
     started_at = str(run.get("started_at") or now.isoformat())
     enqueued_now = 0
     skipped_already_queued = 0
-    skipped_already_success = 0
     skipped_unchanged_hash = 0
     list_pages_written = 0
     list_records_collected = 0
     last_seen_votacao_id = str(run.get("last_seen_votacao_id") or "")
     last_seen_dthr = str(run.get("last_seen_dataHoraRegistro") or "")
+    lp_int = last_processed_votacao_id_int(parts) if mode == "microbatch" else 0
 
     resume_page = int(run.get("recon_list_next_page") or 1) if mode == "reconciliation" else 1
 
@@ -178,11 +182,17 @@ def execute_votacoes_ingestion_tick(
                 "target_year": target_year,
                 "date_start": date_start,
                 "date_end": date_end,
-                "safety_window_hours": int(
-                    os.getenv("VOTACOES_MICROBATCH_SAFETY_WINDOW_HOURS", "48")
+                "microbatch_date_window_days": int(
+                    os.getenv("VOTACOES_MICROBATCH_DATE_WINDOW_DAYS", "2")
                 )
                 if mode == "microbatch"
                 else None,
+                "microbatch_max_list_pages": int(
+                    os.getenv("VOTACOES_MICROBATCH_MAX_LIST_PAGES", "15")
+                )
+                if mode == "microbatch"
+                else None,
+                "last_processed_votacao_id_cursor": lp_int if mode == "microbatch" else None,
                 "reconciliation_day": recon_day if mode == "reconciliation" else None,
                 "watermark_field": "dataHoraRegistro",
                 "offset_field": "id",
@@ -202,16 +212,21 @@ def execute_votacoes_ingestion_tick(
             end_page_limit = min(max_list_pages, page + max_pages_tick - 1)
         else:
             page = 1
-            end_page_limit = max_list_pages
+            mb_cap = max(1, int(os.getenv("VOTACOES_MICROBATCH_MAX_LIST_PAGES", "15")))
+            end_page_limit = min(max_list_pages, mb_cap)
 
         bkf = list_endpoint.business_key_fields or ("id",)
 
         while page <= end_page_limit:
+            ordenar = "id" if mode == "microbatch" else "dataHoraRegistro"
+            ordem = "ASC" if mode == "microbatch" else "DESC"
             payload, _http = api.list_votacoes_page(
                 page=page,
                 itens=list_endpoint.items_per_page,
                 date_start=date_start,
                 date_end=date_end,
+                ordenar_por=ordenar,
+                ordem=ordem,
             )
             dados = payload.get("dados") or []
             list_records_collected += len(dados)
@@ -239,6 +254,8 @@ def execute_votacoes_ingestion_tick(
             for item in dados:
                 if isinstance(item, dict) and item.get("id") is not None:
                     vid_s = str(item.get("id"))
+                    if mode == "microbatch" and vid_s.isdigit() and int(vid_s) <= lp_int:
+                        continue
                     uid, hsh = list_item_uid_hash(
                         domain,
                         endpoint_name=list_endpoint.name,
@@ -304,7 +321,7 @@ def execute_votacoes_ingestion_tick(
             run_type=run_type_label,
         )
 
-        all_ids = sorted(fingerprints.keys())
+        all_ids = sorted(fingerprints.keys(), key=votacao_id_sort_key)
         for vid in all_ids:
             if enqueued_now >= max_messages_per_tick:
                 break
@@ -312,9 +329,6 @@ def execute_votacoes_ingestion_tick(
             state = parts.get_partition(row) or {}
             cur_pid = str(state.get("current_pipeline_run_id", "") or "")
             cur_status = str(state.get("status", "")).upper()
-            if cur_pid == pipeline_run_id and cur_status == "SUCCESS":
-                skipped_already_success += 1
-                continue
             if cur_pid == pipeline_run_id and cur_status in ("QUEUED", "RUNNING"):
                 skipped_already_queued += 1
                 continue
@@ -399,21 +413,39 @@ def execute_votacoes_ingestion_tick(
         total_detected = max(len(all_ids), total_seen)
 
         listing_done = recon_listing_complete if mode == "reconciliation" else listing_complete
-        enqueue_phase_complete = (
-            listing_done
-            and enqueued_now == 0
-            and skipped_already_queued == 0
-            and total_seen >= len(all_ids)
+        n_fanout = len(all_ids)
+        fanout_decisions = (
+            enqueued_now + skipped_already_queued + skipped_unchanged_hash
+        )
+        hit_cap = enqueued_now >= max_messages_per_tick
+        if n_fanout == 0 and listing_done:
+            enqueue_phase_complete = True
+        else:
+            enqueue_phase_complete = (
+                listing_done
+                and not hit_cap
+                and fanout_decisions >= n_fanout
+                and enqueued_now == 0
+                and skipped_already_queued == 0
+            )
+
+        all_skipped_unchanged = (
+            enqueue_phase_complete
+            and n_fanout > 0
+            and skipped_unchanged_hash >= n_fanout
         )
 
         if (
-            enqueue_phase_complete
-            and total_detected == 0
-            and pc["failed"] == 0
-            and pc["poison"] == 0
-            and pc["running"] == 0
-            and pc["queued"] == 0
-            and pc["pending"] == 0
+            (
+                enqueue_phase_complete
+                and total_detected == 0
+                and pc["failed"] == 0
+                and pc["poison"] == 0
+                and pc["running"] == 0
+                and pc["queued"] == 0
+                and pc["pending"] == 0
+            )
+            or all_skipped_unchanged
         ):
             run_status_final = "COMPLETED"
             finished_at_utc = now.isoformat()
@@ -491,11 +523,13 @@ def execute_votacoes_ingestion_tick(
                 "date_end": date_end,
                 "last_seen_votacao_id": last_seen_votacao_id or None,
                 "last_seen_dataHoraRegistro": last_seen_dthr or None,
-                "safety_window_hours": int(
-                    os.getenv("VOTACOES_MICROBATCH_SAFETY_WINDOW_HOURS", "48")
+                "microbatch_date_window_days": int(
+                    os.getenv("VOTACOES_MICROBATCH_DATE_WINDOW_DAYS", "2")
                 )
                 if mode == "microbatch"
                 else None,
+                "last_processed_votacao_id_cursor": lp_int if mode == "microbatch" else None,
+                "skipped_unchanged_hash": skipped_unchanged_hash,
                 "reconciliation_day": recon_day if mode == "reconciliation" else None,
                 "metadata_path": meta_path,
                 "success_marker_path": success_path,
@@ -526,7 +560,6 @@ def execute_votacoes_ingestion_tick(
             enqueued_now=enqueued_now,
             stale_requeued=stale_requeued,
             skipped_already_queued=skipped_already_queued,
-            skipped_already_success=skipped_already_success,
             skipped_unchanged_hash=skipped_unchanged_hash,
             total_tasks_success=pc["success"],
             total_tasks_failed=pc["failed"],

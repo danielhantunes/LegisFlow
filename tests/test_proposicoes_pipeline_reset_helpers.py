@@ -13,6 +13,10 @@ from shared.proposicoes_pipeline_reset_helpers import (
 )
 
 
+def test_daily_pipeline_run_id_accepted() -> None:
+    assert is_allowed_proposicoes_pipeline_run_id("proposicoes_daily_20260511")
+
+
 def test_microbatch_pipeline_run_id_accepted() -> None:
     assert is_allowed_proposicoes_pipeline_run_id(
         "proposicoes_microbatch_202605112230"

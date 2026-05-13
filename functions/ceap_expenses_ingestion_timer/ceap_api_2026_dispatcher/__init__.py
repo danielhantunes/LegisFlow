@@ -1,4 +1,13 @@
-"""Timer: CEAP API dispatcher — daily moving window vs monthly reconciliation (day 25)."""
+"""Timer: CEAP API dispatcher — daily (mês atual) vs reconciliação semanal (domingo UTC).
+
+* **Daily** (default): ``ceap_daily_YYYYMMDD``, meses de
+  ``CEAP_DAILY_LOOKBACK_MONTHS`` (0 = só o mês corrente no ano alvo).
+* **Reconciliation** (default): domingo (``weekday()==6`` em UTC), janela
+  **mês anterior + mês atual** no ``CEAP_TARGET_YEAR`` via
+  :func:`shared.dispatch_months.months_reconciliation_current_and_previous`.
+* **Legado**: ``CEAP_RECONCILIATION_LEGACY_FULL_YEAR=true`` restaura o dia
+  ``CEAP_RECONCILIATION_DAY`` com varredura ``CEAP_RECONCILIATION_START_MONTH``..mês máximo.
+"""
 
 from __future__ import annotations
 
@@ -31,6 +40,7 @@ from shared.deputies_snapshot import (
 from shared.dispatch_months import (
     max_dispatch_month,
     months_daily_moving_window,
+    months_reconciliation_current_and_previous,
     months_reconciliation_window,
 )
 from shared.logger import get_logger, log_structured
@@ -329,8 +339,11 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
 
     target_year = int(os.getenv("CEAP_TARGET_YEAR", os.getenv("CEAP_API_YEAR", "2026")))
     recon_day = int(os.getenv("CEAP_RECONCILIATION_DAY", "25"))
-    lookback = int(os.getenv("CEAP_DAILY_LOOKBACK_MONTHS", "1"))
+    lookback = int(os.getenv("CEAP_DAILY_LOOKBACK_MONTHS", "0"))
     start_month = int(os.getenv("CEAP_RECONCILIATION_START_MONTH", "1"))
+    legacy_full_year_recon = str(
+        os.getenv("CEAP_RECONCILIATION_LEGACY_FULL_YEAR", "")
+    ).lower() in ("1", "true", "yes")
     stale_after_minutes = int(os.getenv("CEAP_STALE_AFTER_MINUTES", "60"))
     max_per_tick = int(
         os.getenv("CEAP_MAX_TASKS_PER_DISPATCH", os.getenv("CEAP_DISPATCH_MAX_MESSAGES", "1000"))
@@ -349,14 +362,20 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         )
         return
 
-    is_reconciliation = now.day == recon_day
-    mode = "reconciliation" if is_reconciliation else "daily"
-    if is_reconciliation:
+    if legacy_full_year_recon and now.day == recon_day:
+        mode = "reconciliation"
         pipeline_run_id = f"ceap_reconciliation_{now:%Y%m%d}"
         month_list = months_reconciliation_window(
             target_year=target_year, now=now, start_month=start_month
         )
+    elif (not legacy_full_year_recon) and now.weekday() == 6:
+        mode = "reconciliation"
+        pipeline_run_id = f"ceap_reconciliation_{now:%Y%m%d}"
+        month_list = months_reconciliation_current_and_previous(
+            target_year=target_year, now=now
+        )
     else:
+        mode = "daily"
         pipeline_run_id = f"ceap_daily_{now:%Y%m%d}"
         month_list = months_daily_moving_window(
             target_year=target_year, now=now, lookback_months=lookback

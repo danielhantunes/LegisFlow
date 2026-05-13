@@ -52,6 +52,11 @@ class InMemoryRawWriter:
             return None
         return json.loads(json.dumps(self.json_files[path]))
 
+    def read_text(self, path: str) -> str | None:
+        if path in self.text_files:
+            return self.text_files[path]
+        return self.files.get(path)
+
     def list_subdirectories(self, prefix: str) -> list[str]:
         prefixes: set[str] = set()
         normalised = prefix.rstrip("/") + "/"

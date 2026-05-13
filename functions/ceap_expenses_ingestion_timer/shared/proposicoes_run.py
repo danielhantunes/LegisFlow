@@ -1,19 +1,15 @@
 """Pure logic for proposicoes work units (autores OR tramitacoes for one prop).
 
-The dispatcher does the listing of ``/proposicoes`` itself (with the audit
-envelope persisted under ``raw/.../list/...``). For every proposicao_id
-detected, the dispatcher enqueues TWO work messages:
+The dispatcher lists ``/proposicoes`` and enqueues two ``DomainWorkMessage`` rows
+per proposição. Each worker invocation persists **one JSONL blob** per
+execution under:
 
-* one with ``endpoint=proposicao_autores``;
-* one with ``endpoint=proposicao_tramitacoes``.
+* ``raw/camara/proposicoes/api/{autores|tramitacoes}/proposicao_id={pid}/``
+  ``pipeline_run_id={pid_run}/execution_id={eid}/snapshot.jsonl``
 
-Both share the same per-proposicao folder layout and use the same worker
-logic implemented here.
+Each line is one page payload with the usual ``_audit`` envelope (append-only
+RAW semantics; Bronze/Silver dedupe analytically).
 
-Layout per (endpoint_name, proposicao_id, pipeline_run_id):
-
-* Pages: ``raw/camara/proposicoes/api/{autores|tramitacoes}/proposicao_id={pid}/``
-  ``pipeline_run_id={pid_run}/execution_id={eid}/page_*.json``
 * Manifest: ``…/_metadata/runs/pipeline_run_id={pid_run}/metadata.json``
 * Marker:   ``…/_metadata/runs/pipeline_run_id={pid_run}/_SUCCESS``
 """
@@ -22,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import json
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from .domain_catalog import DomainSpec, EndpointSpec
@@ -72,12 +69,14 @@ def run_proposicao_sub_snapshot(
     page_fetcher: PageFetcher,
     max_pages: int = 10_000,
 ) -> ProposicaoSubWorkResult:
-    """Paginate one sub-endpoint of one proposicao and persist Raw pages."""
+    """Paginate one sub-endpoint of one proposicao and persist a single JSONL snapshot."""
     raw_dir = proposicao_sub_data_dir(endpoint.name, proposicao_id, pipeline_run_id)
     page = 1
     pages_written = 0
     record_count = 0
-    last_path = ""
+    jsonl_lines: list[str] = []
+    snapshot_rel = f"{raw_dir}/execution_id={execution_id}/snapshot.jsonl"
+    last_path = snapshot_rel
 
     running_meta = build_proposicao_sub_metadata(
         endpoint=endpoint,
@@ -108,9 +107,7 @@ def run_proposicao_sub_snapshot(
         while page <= max_pages:
             payload, _http_status = page_fetcher(page)
             dados = payload.get("dados") or []
-            raw_path = (
-                f"{raw_dir}/execution_id={execution_id}/page_{page}.json"
-            )
+            raw_path = f"{raw_dir}/execution_id={execution_id}/page_{page}.json"
             enriched = enrich_generic_page_payload(
                 payload,
                 pipeline_run_id=pipeline_run_id,
@@ -127,13 +124,14 @@ def run_proposicao_sub_snapshot(
                 parent_id=str(proposicao_id),
                 parent_entity="proposicao",
             )
-            raw_writer.write_json(raw_path, enriched)
-            last_path = raw_path
+            jsonl_lines.append(json.dumps(enriched, ensure_ascii=False))
             pages_written += 1
             record_count += len(dados)
             if not _has_next_link(payload):
                 break
             page += 1
+        if jsonl_lines:
+            raw_writer.write_text(snapshot_rel, "\n".join(jsonl_lines) + "\n")
     except Exception as exc:
         failed_at = datetime.now(UTC).isoformat()
         failed_meta = build_proposicao_sub_metadata(

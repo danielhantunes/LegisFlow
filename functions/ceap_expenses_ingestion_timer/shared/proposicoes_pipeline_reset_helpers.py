@@ -10,9 +10,10 @@ import json
 import re
 
 # Microbatch: ``proposicoes_microbatch_YYYYMMDDHHMM`` (12 trailing digits)
+# Daily: ``proposicoes_daily_YYYYMMDD`` (8 trailing digits)
 # Reconciliation: ``proposicoes_reconciliation_YYYYMMDD`` (8 trailing digits)
 _PROPOSICOES_RUN_RE = re.compile(
-    r"^proposicoes_(microbatch_\d{12}|reconciliation_\d{8})$"
+    r"^proposicoes_(microbatch_\d{12}|daily_\d{8}|reconciliation_\d{8})$"
 )
 
 

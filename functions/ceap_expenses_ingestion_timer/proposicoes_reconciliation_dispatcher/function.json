@@ -5,7 +5,7 @@
       "name": "timer",
       "type": "timerTrigger",
       "direction": "in",
-      "schedule": "%PROPOSICOES_DISPATCH_SCHEDULE%"
+      "schedule": "%PROPOSICOES_RECONCILIATION_DISPATCH_SCHEDULE%"
     }
   ]
 }

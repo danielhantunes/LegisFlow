@@ -69,8 +69,8 @@ variable "lakehouse_storage_account_id" {
 
 variable "ceap_timer_schedule" {
   type        = string
-  description = "CRON schedule for CEAP ingestion timer trigger."
-  default     = "0 */20 * * * *"
+  description = "NCRONTAB for CEAP API dispatcher (default once daily 07:30 UTC; logic branches Sunday=recon)."
+  default     = "0 30 7 * * *"
 }
 
 variable "max_retry_attempts" {
@@ -126,8 +126,8 @@ variable "votacoes_queue_name" {
 
 variable "votacoes_dispatch_schedule" {
   type        = string
-  description = "NCRONTAB (6-field) for votacoes dispatcher: every 10 minutes Mon–Fri UTC."
-  default     = "0 */10 * * * 1-5"
+  description = "NCRONTAB (6-field) for votacoes dispatcher: default every 10 minutes, all days UTC."
+  default     = "0 */10 * * * *"
 }
 
 variable "votacoes_dispatch_granularity_min" {
@@ -206,16 +206,16 @@ variable "proposicoes_queue_name" {
   default     = "proposicoes-api-work"
 }
 
-variable "proposicoes_dispatch_schedule" {
+variable "proposicoes_daily_dispatch_schedule" {
   type        = string
-  description = "CRON for the proposicoes dispatcher (every 20 minutes during validation)."
-  default     = "0 */20 * * * *"
+  description = "NCRONTAB for proposicoes daily dispatcher (list + hash-aware fanout). Default 06:15 UTC daily."
+  default     = "0 15 6 * * *"
 }
 
-variable "proposicoes_dispatch_granularity_min" {
-  type        = number
-  description = "Minute granularity used to derive the microbatch pipeline_run_id."
-  default     = 20
+variable "proposicoes_reconciliation_dispatch_schedule" {
+  type        = string
+  description = "NCRONTAB for proposicoes reconciliation (prev + current month). Default Sunday 06:30 UTC."
+  default     = "0 30 6 * * 0"
 }
 
 variable "proposicoes_lookback_minutes" {
@@ -276,22 +276,34 @@ variable "eventos_queue_name" {
   default     = "eventos-api-work"
 }
 
-variable "eventos_dispatch_schedule" {
+variable "eventos_daily_dispatch_schedule" {
   type        = string
-  description = "CRON for the eventos dispatcher (every 20 minutes during validation)."
-  default     = "0 */20 * * * *"
+  description = "CRON for the eventos daily dispatcher (list + fanout; default 07:15 UTC)."
+  default     = "0 15 7 * * *"
 }
 
-variable "eventos_dispatch_granularity_min" {
-  type        = number
-  description = "Minute granularity used to derive the eventos microbatch pipeline_run_id."
-  default     = 20
+variable "eventos_reconciliation_dispatch_schedule" {
+  type        = string
+  description = "CRON for the eventos reconciliation dispatcher (default Sunday 08:15 UTC)."
+  default     = "0 15 8 * * 0"
 }
 
-variable "eventos_lookback_minutes" {
+variable "eventos_daily_future_days" {
   type        = number
-  description = "How far back the eventos dispatcher scans /eventos on every tick."
-  default     = 60
+  description = "Days after today (UTC) included in the daily /eventos list window (inclusive end date)."
+  default     = 7
+}
+
+variable "eventos_reconciliation_past_days" {
+  type        = number
+  description = "Days before today (UTC) included in the weekly reconciliation /eventos list window."
+  default     = 7
+}
+
+variable "eventos_reconciliation_future_days" {
+  type        = number
+  description = "Days after today (UTC) included in the weekly reconciliation /eventos list window."
+  default     = 30
 }
 
 variable "eventos_lock_ttl_minutes" {
@@ -312,34 +324,10 @@ variable "eventos_max_list_pages" {
   default     = 200
 }
 
-variable "eventos_reconciliation_day" {
-  type        = number
-  description = "UTC calendar day each month when eventos timer runs reconciliation instead of microbatch."
-  default     = 25
-}
-
-variable "eventos_reconciliation_lookback_days" {
-  type        = number
-  description = "Inclusive day span for eventos monthly reconciliation (/eventos list window)."
-  default     = 30
-}
-
 variable "eventos_recon_max_pages_per_tick" {
   type        = number
   description = "Max /eventos list pages per timer tick during monthly reconciliation resume."
   default     = 40
-}
-
-variable "eventos_microbatch_past_days" {
-  type        = number
-  description = "Days before 'now' included in eventos microbatch /eventos list window."
-  default     = 7
-}
-
-variable "eventos_microbatch_future_days" {
-  type        = number
-  description = "Days after 'now' included in eventos microbatch /eventos list window."
-  default     = 7
 }
 
 variable "enable_eventos_reset_function" {

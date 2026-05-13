@@ -52,7 +52,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         return _json({"error": "Invalid JSON body."}, status=400)
 
     now = datetime.now(UTC)
-    recon_day = max(1, min(28, int(os.getenv("EVENTOS_RECONCILIATION_DAY", "25"))))
+    recon_day = now.isoweekday()
     pipeline_run_id = eventos_reconciliation_run_id(now.strftime("%Y-%m-%d"))
 
     date_start = str(body.get("date_start", "") or "").strip()

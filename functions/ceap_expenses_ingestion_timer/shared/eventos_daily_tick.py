@@ -1,102 +1,57 @@
-"""Timer: eventos dispatcher (microbatch + fanout to 4 sub-endpoints).
-
-Each tick:
-
-1. Computes ``eventos_microbatch_YYYYMMDDHHMM`` from the current minute
-   (rounded down to ``EVENTOS_DISPATCH_GRANULARITY_MIN``).
-2. Acquires the eventos dispatcher lock.
-3. Lists ``/eventos`` over ``[now - lookback, now]`` (window applies to
-   ``dataInicio``/``dataFim`` = event start/end).
-4. Persists list pages under ``raw/camara/eventos/api/list/...`` with full
-   ``_audit`` envelope.
-5. For every evento_id detected, enqueues 4 ``DomainWorkMessage`` (one per
-   sub-endpoint).
-6. Reconciles run counters from ``IngestionState`` and writes the aggregate
-   ``metadata.json`` (+ ``_SUCCESS`` only when strictly completed).
-"""
+"""Daily eventos dispatcher tick: list ``/eventos`` once per UTC day, hash-aware fanout."""
 
 from __future__ import annotations
 
 import json
 import os
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 
-import azure.functions as func
-
-from shared.adls_writer import AdlsRawWriter
-from shared.api_client import CamaraApiClient
-from shared.domain_catalog import (
-    EVENTOS_DOMAIN,
-    eventos_microbatch_run_id,
-)
-from shared.eventos_reconciliation_tick import (
-    default_eventos_reconciliation_window,
-    execute_eventos_reconciliation_tick,
-)
-from shared.eventos_raw_manifest import (
+from .adls_writer import AdlsRawWriter
+from .api_client import CamaraApiClient
+from .domain_catalog import EVENTOS_DOMAIN, eventos_daily_run_id
+from .eventos_raw_manifest import (
     EVENTO_SUB_ENDPOINTS,
     EVENTOS_LIST_PREFIX,
     build_eventos_dispatcher_run_metadata,
     persist_eventos_run_metadata,
 )
-from shared.generic_partition_state import GenericPartitionStateStore
-from shared.logger import get_logger, log_structured
-from shared.queue_helpers import (
-    prepare_queue_client_for_dispatch,
-    send_json_message_with_client,
-)
-from shared.queue_messages import DomainWorkMessage
-from shared.raw_audit import enrich_generic_page_payload
-from shared.run_registry import GenericRunRegistry
+from .generic_partition_state import GenericPartitionStateStore
+from .logger import get_logger, log_structured
+from .queue_helpers import prepare_queue_client_for_dispatch, send_json_message_with_client
+from .queue_messages import DomainWorkMessage
+from .raw_audit import enrich_generic_page_payload
+from .run_registry import GenericRunRegistry
+from .votacoes_api_dispatcher_logic import list_item_uid_hash
 
 logger = get_logger()
 
 
 def _state_row_key(endpoint_name: str, evento_id: str) -> str:
-    """One IngestionState row per (sub_endpoint, evento_id)."""
     return f"{endpoint_name}|{evento_id}"
 
 
-def _round_minute_down(now: datetime, granularity_min: int) -> datetime:
-    minute = (now.minute // granularity_min) * granularity_min
-    return now.replace(minute=minute, second=0, microsecond=0)
+def _daily_api_date_window(*, now: datetime) -> tuple[str, str, datetime, datetime]:
+    """API date range: today through today + ``EVENTOS_DAILY_FUTURE_DAYS`` (inclusive)."""
+    now_utc = now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
+    today = now_utc.date()
+    future_days = max(0, int(os.getenv("EVENTOS_DAILY_FUTURE_DAYS", "7")))
+    end_d = today + timedelta(days=future_days)
+    date_start = today.isoformat()
+    date_end = end_d.isoformat()
+    window_start = datetime.combine(today, time.min, tzinfo=UTC)
+    window_end = datetime.combine(
+        end_d, time.max.replace(microsecond=999999), tzinfo=UTC
+    )
+    return date_start, date_end, window_start, window_end
 
 
-def _fmt_window_param(dt: datetime) -> str:
-    return dt.date().isoformat()
-
-
-def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
+def execute_eventos_daily_tick(*, now: datetime) -> None:
     domain = EVENTOS_DOMAIN
-    now = datetime.now(UTC)
-    recon_day = max(1, min(28, int(os.getenv("EVENTOS_RECONCILIATION_DAY", "25"))))
-    lookback_days = max(
-        1, int(os.getenv("EVENTOS_RECONCILIATION_LOOKBACK_DAYS", "30"))
-    )
-    if now.day == recon_day:
-        ds, de = default_eventos_reconciliation_window(now=now, lookback_days=lookback_days)
-        execute_eventos_reconciliation_tick(
-            now=now,
-            date_start=ds,
-            date_end=de,
-            recon_day=recon_day,
-            lookback_days=lookback_days,
-        )
-        return
-
-    granularity = max(
-        1, int(os.getenv("EVENTOS_DISPATCH_GRANULARITY_MIN", "20"))
-    )
-    past_days = max(0, int(os.getenv("EVENTOS_MICROBATCH_PAST_DAYS", "7")))
-    future_days = max(0, int(os.getenv("EVENTOS_MICROBATCH_FUTURE_DAYS", "7")))
-    anchor = _round_minute_down(now, granularity)
-    pipeline_run_id = eventos_microbatch_run_id(
-        anchor.strftime("%Y-%m-%dT%H:%M")
-    )
-    window_end = now + timedelta(days=future_days)
-    window_start = now - timedelta(days=past_days)
+    now = now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
+    pipeline_run_id = eventos_daily_run_id(now.strftime("%Y-%m-%d"))
+    date_start, date_end, window_start, window_end = _daily_api_date_window(now=now)
 
     conn = os.environ["AzureWebJobsStorage"]
     control_table = os.getenv("INGESTION_CONTROL_TABLE", "IngestionControlApi2026")
@@ -129,14 +84,14 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         log_structured(
             logger,
             "info",
-            "Eventos dispatch skipped: run already COMPLETED.",
+            "Eventos daily dispatch skipped: run already COMPLETED.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
         )
         return
 
     acquired, lock_token = registry.try_acquire_dispatcher_lock(
-        mode="microbatch",
+        mode="daily",
         pipeline_run_id=pipeline_run_id,
         ttl_minutes=lock_ttl,
     )
@@ -144,7 +99,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         log_structured(
             logger,
             "info",
-            "Eventos dispatch skipped: dispatcher lock held.",
+            "Eventos daily dispatch skipped: dispatcher lock held.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
         )
@@ -153,10 +108,11 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
     started_at = str(run.get("started_at") or now.isoformat())
     enqueued_now = 0
     skipped_already_queued = 0
-    skipped_already_success = 0
+    skipped_same_list_hash = 0
     list_pages_written = 0
     list_records_collected = 0
     detected_ids: set[str] = set()
+    fingerprints_by_id: dict[str, str] = {}
 
     api = CamaraApiClient(base_url=domain.api_base_url)
     raw_writer = AdlsRawWriter(account_name=raw_account)
@@ -166,8 +122,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         f"{EVENTOS_LIST_PREFIX}/pipeline_run_id={pipeline_run_id}/"
         f"execution_id={pipeline_run_id}"
     )
-    date_start = _fmt_window_param(window_start)
-    date_end = _fmt_window_param(window_end)
+    bkf = list_endpoint.business_key_fields or ("id",)
     sub_count = len(sub_endpoints)
 
     try:
@@ -175,7 +130,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             registry.upsert_run(
                 {
                     "pipeline_run_id": pipeline_run_id,
-                    "run_type": "microbatch",
+                    "run_type": "daily",
                     "status": "STARTED",
                     "domain": domain.name,
                     "window_start_utc": window_start.isoformat(),
@@ -193,12 +148,14 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                     "sub_endpoints": json.dumps(list(EVENTO_SUB_ENDPOINTS)),
                     "hash_strategy": domain.hash_strategy,
                     "audit_fields_applied": json.dumps(list(domain.audit_fields)),
+                    "api_date_start": date_start,
+                    "api_date_end": date_end,
                 }
             )
 
         running_meta = build_eventos_dispatcher_run_metadata(
             pipeline_run_id=pipeline_run_id,
-            mode="microbatch",
+            mode="daily",
             status="RUNNING",
             started_at_utc=started_at,
             finished_at_utc=None,
@@ -226,7 +183,6 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             write_success_marker_now=False,
         )
 
-        # 1) Listagem paginada de /eventos na janela.
         page = 1
         while page <= max_list_pages:
             payload, _http = api.list_eventos_page(
@@ -248,21 +204,29 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 api_path=list_endpoint.path_template,
                 raw_path=raw_path,
                 page=page,
-                business_key_fields=list_endpoint.business_key_fields or ("id",),
+                business_key_fields=bkf,
                 source_system=domain.source_system,
                 api_base_url=domain.api_base_url,
                 extra_audit={
                     "_window_start_utc": window_start.isoformat(),
                     "_window_end_utc": window_end.isoformat(),
+                    "_api_date_start": date_start,
+                    "_api_date_end": date_end,
                 },
             )
             raw_writer.write_json(raw_path, enriched)
             list_pages_written += 1
             for item in dados:
-                if isinstance(item, dict):
-                    eid = item.get("id")
-                    if eid is not None:
-                        detected_ids.add(str(eid))
+                if isinstance(item, dict) and item.get("id") is not None:
+                    eid = str(item.get("id"))
+                    detected_ids.add(eid)
+                    _uid, hsh = list_item_uid_hash(
+                        domain,
+                        endpoint_name=list_endpoint.name,
+                        business_key_fields=bkf,
+                        item=item,
+                    )
+                    fingerprints_by_id[eid] = hsh
             links = payload.get("links") or []
             has_next = any(
                 isinstance(li, dict) and li.get("rel") == "next" for li in links
@@ -271,16 +235,15 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 break
             page += 1
 
-        # 2) Fanout: enqueue 4 messages por evento.
         queue_client = prepare_queue_client_for_dispatch(
             queue_name,
             logger=logger,
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
         )
+
         for eid in sorted(detected_ids):
-            if enqueued_now >= max_messages_per_tick:
-                break
+            list_hash = fingerprints_by_id.get(eid) or ""
             for sub_ep in sub_endpoints:
                 if enqueued_now >= max_messages_per_tick:
                     break
@@ -288,23 +251,27 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 state = parts.get_partition(row) or {}
                 cur_pid = str(state.get("current_pipeline_run_id", "") or "")
                 cur_status = str(state.get("status", "")).upper()
-                if cur_pid == pipeline_run_id and cur_status == "SUCCESS":
-                    skipped_already_success += 1
-                    continue
                 if cur_pid == pipeline_run_id and cur_status in ("QUEUED", "RUNNING"):
                     skipped_already_queued += 1
                     continue
+                if cur_status == "SUCCESS" and list_hash and str(
+                    state.get("last_list_item_hash") or ""
+                ) == list_hash:
+                    skipped_same_list_hash += 1
+                    continue
+
                 execution_id = str(uuid.uuid4())
                 dispatched_at = datetime.now(UTC).isoformat()
                 wm = DomainWorkMessage(
                     domain=domain.name,
                     endpoint=sub_ep.name,
                     pipeline_run_id=pipeline_run_id,
-                    run_type="microbatch",
+                    run_type="daily",
                     payload={
                         "evento_id": eid,
                         "window_start_utc": window_start.isoformat(),
                         "window_end_utc": window_end.isoformat(),
+                        "list_item_hash": list_hash,
                     },
                     execution_id=execution_id,
                     dispatched_at=dispatched_at,
@@ -332,7 +299,6 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 parts.upsert_partition(row, patch)
                 enqueued_now += 1
 
-        # 3) Reconciliar contadores.
         pc = parts.count_statuses_by_run(pipeline_run_id)
         total_seen = (
             pc["queued"]
@@ -344,15 +310,41 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
             + pc["stale"]
             + pc["other"]
         )
-        # Each detected evento yields ``sub_count`` sub-tasks.
         total_expected = max(len(detected_ids) * sub_count, total_seen)
-        enqueue_phase_complete = (
-            list_pages_written > 0
-            and enqueued_now == 0
-            and skipped_already_queued == 0
-            and total_seen >= len(detected_ids) * sub_count
+        fanout_target = len(detected_ids) * sub_count
+        fanout_decisions = (
+            enqueued_now + skipped_already_queued + skipped_same_list_hash
         )
+        hit_cap = enqueued_now >= max_messages_per_tick
+        if not detected_ids:
+            enqueue_phase_complete = bool(list_pages_written > 0)
+        else:
+            enqueue_phase_complete = (
+                list_pages_written > 0
+                and not hit_cap
+                and fanout_decisions >= fanout_target
+                and enqueued_now == 0
+                and skipped_already_queued == 0
+            )
+
+        all_subtasks_skipped_hash = (
+            enqueue_phase_complete
+            and fanout_target > 0
+            and skipped_same_list_hash >= fanout_target
+        )
+
         if (
+            enqueue_phase_complete
+            and total_expected == 0
+            and pc["failed"] == 0
+            and pc["poison"] == 0
+            and pc["running"] == 0
+            and pc["queued"] == 0
+            and pc["pending"] == 0
+        ) or all_subtasks_skipped_hash:
+            run_status_final = "COMPLETED"
+            finished_at_utc = datetime.now(UTC).isoformat()
+        elif (
             enqueue_phase_complete
             and total_expected > 0
             and pc["success"] >= total_expected
@@ -388,13 +380,14 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
                 "list_records_collected": list_records_collected,
                 "window_start_utc": window_start.isoformat(),
                 "window_end_utc": window_end.isoformat(),
+                "api_date_start": date_start,
+                "api_date_end": date_end,
             }
         )
 
-        # 4) Manifest agregado + _SUCCESS quando estritamente concluído.
         agg_meta = build_eventos_dispatcher_run_metadata(
             pipeline_run_id=pipeline_run_id,
-            mode="microbatch",
+            mode="daily",
             status=run_status_final,
             started_at_utc=started_at,
             finished_at_utc=finished_at_utc,
@@ -427,18 +420,20 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         log_structured(
             logger,
             "info",
-            "Eventos dispatch tick finished.",
+            "Eventos daily dispatch tick finished.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
             window_start_utc=window_start.isoformat(),
             window_end_utc=window_end.isoformat(),
+            api_date_start=date_start,
+            api_date_end=date_end,
             list_pages_written=list_pages_written,
             list_records_collected=list_records_collected,
             total_detected=len(detected_ids),
             total_expected=total_expected,
             enqueued_now=enqueued_now,
             skipped_already_queued=skipped_already_queued,
-            skipped_already_success=skipped_already_success,
+            skipped_same_list_hash=skipped_same_list_hash,
             total_tasks_success=pc["success"],
             total_tasks_failed=pc["failed"],
             total_tasks_running=pc["running"],
@@ -451,7 +446,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         log_structured(
             logger,
             "error",
-            "Eventos dispatcher failed.",
+            "Eventos daily dispatcher failed.",
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
             error=str(exc)[:500],
@@ -472,7 +467,7 @@ def main(timer: func.TimerRequest) -> None:  # noqa: ARG001
         try:
             failed_meta = build_eventos_dispatcher_run_metadata(
                 pipeline_run_id=pipeline_run_id,
-                mode="microbatch",
+                mode="daily",
                 status="FAILED",
                 started_at_utc=started_at,
                 finished_at_utc=None,

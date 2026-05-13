@@ -273,6 +273,8 @@ def run_proposicoes_pipeline_reset(
         pr_safe = safe_path_segment(pipeline_run_id)
         needle_run = f"pipeline_run_id={pipeline_run_id}"
         needle_safe = f"pipeline_run_id={pr_safe}"
+        needle_run_id = f"run_id={pipeline_run_id}"
+        needle_run_id_safe = f"run_id={pr_safe}"
         prefixes = [
             "raw/camara/proposicoes/api/list/",
             "raw/camara/proposicoes/api/autores/",
@@ -281,7 +283,12 @@ def run_proposicoes_pipeline_reset(
         ]
         for base_prefix in prefixes:
             for name in _list_file_paths(fs, base_prefix):
-                if needle_run not in name and needle_safe not in name:
+                if (
+                    needle_run not in name
+                    and needle_safe not in name
+                    and needle_run_id not in name
+                    and needle_run_id_safe not in name
+                ):
                     continue
                 if "_metadata/" in name.replace("\\", "/"):
                     summary.deleted["metadata_files"] += 1

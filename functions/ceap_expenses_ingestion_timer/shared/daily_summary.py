@@ -200,6 +200,21 @@ def _recon_day_for(iso_date: str, recon_day: int) -> bool:
     return d.day == recon_day
 
 
+def _ceap_reconciliation_expected_on_reference_date(iso_date: str) -> bool:
+    """True when CEAP dispatcher would run reconciliation on ``iso_date`` (UTC date)."""
+    legacy = str(
+        os.getenv("CEAP_RECONCILIATION_LEGACY_FULL_YEAR", "")
+    ).lower() in ("1", "true", "yes")
+    if legacy:
+        recon_day = int(os.getenv("CEAP_RECONCILIATION_DAY", "25"))
+        return _recon_day_for(iso_date, recon_day)
+    try:
+        ref_d = date.fromisoformat(iso_date)
+    except ValueError:
+        return False
+    return ref_d.weekday() == 6
+
+
 def _collect_ceap_runs(
     *,
     adls: AdlsRawWriter,
@@ -208,9 +223,10 @@ def _collect_ceap_runs(
     now_utc: datetime,
 ) -> list[RunInspection]:
     out: list[RunInspection] = []
-    recon_day = int(os.getenv("CEAP_RECONCILIATION_DAY", "25"))
     for pid in _ceap_candidates(reference_date, now_utc):
-        if pid.startswith("ceap_reconciliation_") and not _recon_day_for(reference_date, recon_day):
+        if pid.startswith(
+            "ceap_reconciliation_"
+        ) and not _ceap_reconciliation_expected_on_reference_date(reference_date):
             continue
         meta_path = ceap_run_metadata_path(pid)
         if not adls.path_exists(meta_path) and registry.get_run(pid) is None:

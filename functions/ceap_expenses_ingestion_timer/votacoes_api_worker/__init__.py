@@ -18,6 +18,7 @@ from shared.generic_partition_state import GenericPartitionStateStore
 from shared.logger import get_logger, log_structured
 from shared.queue_messages import DomainWorkMessage
 from shared.run_registry import GenericRunRegistry
+from shared.votacoes_microbatch_cursor import advance_last_processed_votacao_cursor
 from shared.votacoes_run import run_votacao_votos_snapshot
 
 logger = get_logger()
@@ -96,6 +97,23 @@ def main(msg: func.QueueMessage) -> None:
 
     state_row = _state_row_key(votacao_id)
     state_now = parts.get_partition(state_row) or {}
+    if (
+        str(state_now.get("status", "")).upper() == "SUCCESS"
+        and list_record_hash
+        and str(state_now.get("last_votacao_list_record_hash") or "") == list_record_hash
+    ):
+        log_structured(
+            logger,
+            "info",
+            "Votacoes worker skipped: SUCCESS with unchanged list_record_hash.",
+            domain=domain.name,
+            endpoint=endpoint.name,
+            votacao_id=votacao_id,
+            pipeline_run_id=wm.pipeline_run_id,
+            dequeue_count=dequeue_count,
+        )
+        return
+
     same_run = (
         str(state_now.get("current_pipeline_run_id", "") or "")
         == wm.pipeline_run_id
@@ -198,6 +216,8 @@ def main(msg: func.QueueMessage) -> None:
             },
         )
         registry.merge_run_counters(wm.pipeline_run_id, success_delta=1)
+        if str(wm.run_type or "").strip().lower() == "microbatch":
+            advance_last_processed_votacao_cursor(parts, votacao_id=votacao_id)
     else:
         parts.upsert_partition(
             state_row,
