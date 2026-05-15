@@ -29,6 +29,12 @@ def test_reconciliation_pipeline_run_id_accepted() -> None:
     )
 
 
+def test_controlled_recoctl_pipeline_run_id_accepted() -> None:
+    assert is_allowed_proposicoes_pipeline_run_id(
+        "proposicoes_recoctl_a1b2c3d4e5f67890"
+    )
+
+
 def test_disallowed_pipeline_run_ids() -> None:
     assert not is_allowed_proposicoes_pipeline_run_id("")
     assert not is_allowed_proposicoes_pipeline_run_id("votacoes_microbatch_202605112230")

@@ -261,6 +261,8 @@ PROPOSICOES_DOMAIN = DomainSpec(
         "proposicoes_microbatch_",
         "proposicoes_daily_",
         "proposicoes_reconciliation_",
+        "proposicoes_recoctl_",
+        "current_year_backfill_",
     ),
     queue_work="proposicoes-api-work",
     queue_poison="proposicoes-api-work-poison",
@@ -529,7 +531,9 @@ DISCURSOS_DOMAIN = DomainSpec(
 )
 
 
-_PIPELINE_RUN_ID_RE = re.compile(r"^[a-z0-9_]{1,80}_\d{8}(?:\d{4})?$")
+_PIPELINE_RUN_ID_RE = re.compile(
+    r"^[a-z0-9_]{1,80}_(?:\d{8}|\d{12}|\d{14}|[a-f0-9]{16})$"
+)
 
 
 def is_well_formed_pipeline_run_id(pipeline_run_id: str) -> bool:

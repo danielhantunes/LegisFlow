@@ -97,8 +97,14 @@ def main(msg: func.QueueMessage) -> None:
     state_row = _state_row_key(endpoint.name, proposicao_id)
     state_now = parts.get_partition(state_row) or {}
     list_hash = str((payload.get("list_item_hash") or "")).strip()
+    force_reprocess = str(payload.get("force_reprocess", "")).lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     if (
-        str(state_now.get("status", "")).upper() == "SUCCESS"
+        not force_reprocess
+        and str(state_now.get("status", "")).upper() == "SUCCESS"
         and list_hash
         and str(state_now.get("last_list_item_hash") or "") == list_hash
     ):

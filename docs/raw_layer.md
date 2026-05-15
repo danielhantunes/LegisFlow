@@ -1,87 +1,87 @@
-# Camada RAW (ADLS Gen2) — LegisFlow
+# RAW layer (ADLS Gen2) — LegisFlow
 
-## 1. Objetivo
+## 1. Purpose
 
-A camada RAW guarda respostas JSON da API Dados Abertos (e metadados de corrida) de forma **rastreável** e **idempotente** por `pipeline_run_id`, preparando consumo downstream (Bronze/Delta, etc.).
+The RAW layer stores Open Data API JSON responses (and run metadata) in a **traceable**, **idempotent** way per `pipeline_run_id`, ready for downstream consumption (Bronze/Delta, etc.).
 
 ## 2. Storage
 
-- **Conta:** storage account do lakehouse provisionado pelo Terraform `base` (nome variável; referência via output `lakehouse_storage_account_name`).
-- **Filesystem:** `lakehouse` (configurável por `LAKEHOUSE_FILESYSTEM_NAME`).
-- **Criação de diretórios:** o `AdlsRawWriter` grava ficheiros com path completo; **não** é obrigatório pré-criar cada pasta no Terraform `base` para novos domínios — o ADLS materializa a árvore na primeira escrita. O `base` mantém um conjunto **mínimo** de diretórios iniciais (`lakehouse_directories` em `infra/terraform/base/main.tf`) por governança; evitar duplicar paths que já são criados só pela app (histórico de conflitos 409).
+- **Account:** lakehouse storage account provisioned by Terraform `base` (name varies; reference via output `lakehouse_storage_account_name`).
+- **Filesystem:** `lakehouse` (configurable via `LAKEHOUSE_FILESYSTEM_NAME`).
+- **Directory creation:** `AdlsRawWriter` writes files with full paths; you **do not** need to pre-create every folder in Terraform `base` for new domains — ADLS materializes the tree on first write. `base` keeps a **minimal** set of initial directories (`lakehouse_directories` in `infra/terraform/base/main.tf`) for governance; avoid duplicating paths that only the app creates (historical 409 conflicts).
 
-## 3. Convenção de prefixos
+## 3. Prefix convention
 
-Padrão geral:
+General pattern:
 
 ```text
-raw/camara/<domínio>/api/...
+raw/camara/<domain>/api/...
 ```
 
-Exemplos **implementados** no código:
+**Implemented** examples in code:
 
-| Domínio | Áreas principais sob `raw/camara/` |
-|---------|--------------------------------------|
-| CEAP | `ceap/api/despesas/...`, `deputados/api/list/...` (snapshot deputados) |
-| reference | `partidos`, `legislaturas`, `deputados`, `frentes`, `orgaos` (cada um com `api/list/...`) |
+| Domain | Main areas under `raw/camara/` |
+|--------|----------------------------------|
+| CEAP | `ceap/api/despesas/...`, `deputados/api/list/...` (deputy snapshot) |
+| reference | `partidos`, `legislaturas`, `deputados`, `frentes`, `orgaos` (each with `api/list/...`) |
 | votacoes | `votacoes/api/list`, `votacoes/api/votos`, `_metadata/runs/...` |
 | proposicoes | `proposicoes/api/list`, `autores`, `tramitacoes`, `_metadata/...` |
 | eventos | `eventos/api/list`, `deputados`, `orgaos`, `pauta`, `votacoes`, `_metadata/...` |
 | institucional | `institucional/api/parents/...`, `orgaos|partidos|frentes|legislaturas/...`, `_metadata/...` |
 | discursos | `discursos/api/discursos/...`, `discursos/api/deputies_snapshot/...`, `_metadata/...` |
 
-Os paths exatos (incluindo `pipeline_run_id=`, `execution_id=`, `page_n.json`) estão nos módulos `shared/*_raw_manifest.py` e nos writers dos dispatchers/workers.
+Exact paths (including `pipeline_run_id=`, `execution_id=`, `page_n.json`) live in `shared/*_raw_manifest.py` and dispatcher/worker writers.
 
-## 4. Nomenclatura de ficheiros
+## 4. File naming
 
-- **Páginas API:** tipicamente `page_{n}.json` por página paginada.
-- **Manifesto de corrida:** `metadata.json` (contrato central em `shared/metadata.py`, versão `1.0`).
-- **Conclusão:** ficheiro zero-byte `_SUCCESS` no mesmo nível lógico do manifesto quando o run está **estritamente** `COMPLETED` (regras em `validate_completed_metadata` / perfis `PROFILE_*`).
+- **API pages:** typically `page_{n}.json` per paginated page.
+- **Run manifest:** `metadata.json` (central contract in `shared/metadata.py`, version `1.0`).
+- **Completion:** zero-byte `_SUCCESS` at the same logical level as the manifest when the run is **strictly** `COMPLETED` (rules in `validate_completed_metadata` / `PROFILE_*` profiles).
 
-## 5. Estratégia de particionamento (RAW)
+## 5. RAW partitioning strategy
 
-Combinações comuns (nem todas aplicam a todos os domínios):
+Common combinations (not all domains use all of them):
 
 - `reference_date=`, `reference_year=`, `reference_month=`
 - `pipeline_run_id=`
 - `execution_id=`
-- IDs de entidade: `deputado_id=`, `evento_id=`, `parent_id=`, `votacao_id=`, etc.
+- Entity IDs: `deputado_id=`, `evento_id=`, `parent_id=`, `votacao_id=`, etc.
 
-Objetivo: **evitar colisão** entre execuções paralelas e permitir **replay** sem sobrescrever histórico inadvertidamente (muitos writers fazem overwrite explícito do mesmo path dentro do **mesmo** run — comportamento idempotente de replay controlado).
+Goal: **avoid collisions** across parallel runs and allow **replay** without accidentally overwriting history (many writers explicitly overwrite the same path within the **same** run — controlled replay idempotency).
 
 ## 6. `pipeline_run_id`
 
-- Identificador **determinístico** da corrida por domínio (ex.: `ceap_daily_YYYYMMDD`, `votacoes_microbatch_YYYYMMDDHHMM`, `reference_snapshot_YYYYMMDD`).
-- Prefixos e formatos declarados em `shared/domain_catalog.py` e helpers (`*_run_id`, `*_reconciliation_run_id`).
-- **Isolamento:** tabelas partilhadas (`IngestionState`, `IngestionControlApi2026`) usam **PartitionKey** distinto por domínio para não misturar contagens.
+- **Deterministic** run identifier per domain (e.g. `ceap_daily_YYYYMMDD`, `votacoes_microbatch_YYYYMMDDHHMM`, `reference_snapshot_YYYYMMDD`).
+- Prefixes and formats declared in `shared/domain_catalog.py` and helpers (`*_run_id`, `*_reconciliation_run_id`).
+- **Isolation:** shared tables (`IngestionState`, `IngestionControlApi2026`) use a distinct **PartitionKey** per domain so counts do not mix.
 
-## 7. Rastreabilidade e auditoria
+## 7. Traceability and audit
 
-Por página (ou por item em `dados`, conforme domínio):
+Per page (or per item in `dados`, depending on domain):
 
-- **`_audit`:** metadados de ingestão (`_pipeline_run_id`, `_execution_id`, `_source_endpoint`, `_raw_path`, `_ingested_at_utc`, …).
-- **`_payload_hash`:** hash do payload sem campos de auditoria.
-- **`_record_uid` / `_record_hash`:** chave de negócio estável + hash do registo (estratégia `payload_and_record_hash_v1` documentada em `metadata.json` como `hash_strategy` onde o manifesto o inclui).
-- Chaves de negócio podem usar **notação pontilhada** (ex.: `proposicao_.id`, `parlamentar.id`) resolvida em `shared/raw_audit.py`.
+- **`_audit`:** ingestion metadata (`_pipeline_run_id`, `_execution_id`, `_source_endpoint`, `_raw_path`, `_ingested_at_utc`, …).
+- **`_payload_hash`:** hash of the payload excluding audit fields.
+- **`_record_uid` / `_record_hash`:** stable business key + record hash (`payload_and_record_hash_v1` strategy documented in `metadata.json` as `hash_strategy` when the manifest includes it).
+- Business keys may use **dotted notation** (e.g. `proposicao_.id`, `parlamentar.id`) resolved in `shared/raw_audit.py`.
 
 ## 8. Poison queue
 
-- Cada domínio tem fila **`*-poison`** irmã da fila de trabalho.
-- Triggers `*_poison_handler` marcam a partição afetada como **POISON** em `IngestionState` e ajustam contadores do run em `IngestionControlApi2026` quando o `pipeline_run_id` pertence ao domínio.
+- Each domain has a **`*-poison`** sibling to the work queue.
+- `*_poison_handler` triggers mark the affected partition **POISON** in `IngestionState` and adjust run counters in `IngestionControlApi2026` when `pipeline_run_id` belongs to that domain.
 
 ## 9. Replay (HTTP)
 
-- Rotas `replay/<domínio>` (ver `fn_replay_*`): leem `IngestionState`, filtram por estados (ex.: `FAILED,POISON`), reenviam mensagens JSON para a fila work e repõem estado **QUEUED**.
-- **Não** substituem a semântica de corridas agendadas; servem recuperação operacional manual.
+- `replay/<domain>` routes (see `fn_replay_*`): read `IngestionState`, filter by state (e.g. `FAILED,POISON`), re-send JSON messages to the work queue, reset state to **QUEUED**.
+- They **do not** replace scheduled run semantics; they are for **manual** operational recovery.
 
 ## 10. Reset (HTTP)
 
-- Rotas `legisflow/reset/*-pipeline-run`: limpeza dirigida por `pipeline_run_id` (tabelas, filas, paths ADLS) com **dry-run** por defeito e flags `ENABLE_RESET_FUNCTIONS` / `ENABLE_<DOMAIN>_RESET_FUNCTION`.
-- Uso pretendido: **dev/test**; validação de formato de `pipeline_run_id` por domínio nos módulos `*_pipeline_reset_helpers.py`.
+- `legisflow/reset/*-pipeline-run` routes: targeted cleanup by `pipeline_run_id` (tables, queues, ADLS paths) with **dry-run** by default and flags `ENABLE_RESET_FUNCTIONS` / `ENABLE_<DOMAIN>_RESET_FUNCTION`.
+- Intended use: **dev/test**; `pipeline_run_id` format validation per domain in `*_pipeline_reset_helpers.py`.
 
-## 11. Referências de código
+## 11. Code references
 
-- Contrato: `shared/metadata.py`
-- Escrita ADLS: `shared/adls_writer.py`
+- Contract: `shared/metadata.py`
+- ADLS writes: `shared/adls_writer.py`
 - Envelope: `shared/raw_audit.py`
-- Mensagens de fila: `shared/queue_messages.py`
+- Queue messages: `shared/queue_messages.py`

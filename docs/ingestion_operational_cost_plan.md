@@ -13,10 +13,10 @@ changed or remains to validate manually.
 | `reference_snapshot_dispatcher` | Timer | One `reference_snapshot_YYYYMMDD` per reference date; short-circuits when enqueue complete. |
 | `reference_snapshot_worker` | Queue | Per-endpoint snapshot work. |
 | `votacoes_api_dispatcher` | Timer | Microbatch every N minutes (default 10). |
-| `votacoes_api_worker` | Queue | Per-votação fanout. |
+| `votacoes_api_worker` | Queue | Per roll-call (`votacao`) fanout. |
 | `proposicoes_daily_dispatcher` | Timer | Daily list + hash-aware fanout. |
 | `proposicoes_reconciliation_dispatcher` | Timer | Weekly reconciliation window. |
-| `proposicoes_worker` | Queue | Per proposição × sub-endpoint. |
+| `proposicoes_worker` | Queue | Per bill (`proposicao`) × sub-endpoint. |
 | `eventos_daily_dispatcher` / `eventos_reconciliation_dispatcher` | Timer | Daily vs weekly recon. |
 | `eventos_worker` | Queue | Per evento × 4 sub-endpoints. |
 | `discursos_daily_dispatcher` / `discursos_reconciliation_dispatcher` | Timer | Daily JSONL deputies snapshot + hash fanout; weekly recon (prev month → today UTC). |
@@ -33,7 +33,7 @@ changed or remains to validate manually.
 | `reference_snapshot_dispatch_schedule` | `0 0 6 * * *` | Reference/deputados-style snapshot once per day (was every 20 min). |
 | `discursos_daily_dispatch_schedule` | `0 25 7 * * *` | Daily deputies list + fanout. |
 | `discursos_reconciliation_dispatch_schedule` | `0 25 8 * * 0` | Sunday reconciliation window (first of prev month through today). |
-| `votacoes_dispatch_schedule` | `0 */10 * * * *` | Kept microbatch for votações only. |
+| `votacoes_dispatch_schedule` | `0 */10 * * * *` | Kept microbatch for votes (`votacoes`) only. |
 | `proposicoes_daily_dispatch_schedule` | `0 15 6 * * *` | Already aligned. |
 | `proposicoes_reconciliation_dispatch_schedule` | `0 30 6 * * 0` | Sunday reconciliation. |
 | `eventos_*` | `0 15 7…` / `0 15 8…` | Already aligned. |
@@ -45,7 +45,7 @@ changed or remains to validate manually.
 
 - CEAP: `CEAP_API_QUEUE_NAME` (default `ceap-api-2026-work`)
 - Reference: `REFERENCE_SNAPSHOT_QUEUE_NAME`
-- Votações / Proposições / Eventos / Discursos / Institucional: per-domain `*_QUEUE_NAME` in Terraform `main.tf`.
+- Votes (`votacoes`) / bills (`proposicoes`) / events / speeches (`discursos`) / institutional: per-domain `*_QUEUE_NAME` in Terraform `main.tf`.
 
 ## 4. Ingestion state
 
@@ -56,7 +56,7 @@ or CEAP partition rows; proposicoes daily writes list snapshot + changed JSONL u
 
 ## 5. RAW / ADLS
 
-- **Proposições daily:** JSONL snapshot + `changed_records.jsonl` + operation manifest under list batch paths (see `shared/proposicoes_list_batch_paths.py`).
+- **Bills (`proposicoes`) daily:** JSONL snapshot + `changed_records.jsonl` + operation manifest under list batch paths (see `shared/proposicoes_list_batch_paths.py`).
 - **CEAP:** Pages per deputy/month; deputies snapshot multi-page JSON (high write count when snapshot rebuilt).
 - **Workers** (proposicoes, eventos, …): still page-level JSON per API page in many paths — moving entirely to “one JSONL per run” is a larger refactor (task 7 partial: dispatcher list side already batched for proposicoes).
 

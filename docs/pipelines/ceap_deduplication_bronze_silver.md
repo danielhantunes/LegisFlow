@@ -1,33 +1,33 @@
-# CEAP — Deduplicação na Bronze e Silver
+# CEAP — Deduplication in Bronze and Silver
 
-## Contexto
+## Context
 
-A ingestão API 2026 é **idempotente ao nível do ficheiro Raw** (caminho fixo por página). Mesmo assim, reprocessamentos e sobreposições podem produzir o mesmo conteúdo em ficheiros distintos se o layout Raw mudar no futuro, ou registos repetidos dentro de payloads JSON. As camadas Bronze e Silver devem **deduplicar semanticamente** antes de métricas de negócio.
+2026 API ingestion is **idempotent at the Raw file level** (fixed path per page). Re-runs and overlaps can still produce the same logical content in different files if the Raw layout changes later, or duplicate records inside JSON payloads. Bronze and Silver should **deduplicate semantically** before business metrics.
 
-## Chaves sugeridas (API despesas CEAP)
+## Suggested keys (CEAP expenses API)
 
-Com base nos campos habituais da API de despesas por deputado, use uma chave composta estável quando disponível:
+From typical fields in the per-deputy expenses API, use a stable composite key when available:
 
-- `id_deputado` (ou identificador técnico equivalente no payload)
-- `ano`, `mes` (já partilhados pela unidade de ingestão)
+- `id_deputado` (or equivalent technical id in the payload)
+- `ano`, `mes` (already shared by the ingestion unit)
 - `codDocumento`
 - `dataDocumento`
 - `urlDocumento`
-- `numDocumento` (se existir no payload)
-- `tipoDespesa` (se necessário para desambiguar)
-- `valorDocumento` (opcional; cuidado com comparação float — preferir valor normalizado em string decimal)
+- `numDocumento` (if present in payload)
+- `tipoDespesa` (if needed to disambiguate)
+- `valorDocumento` (optional; be careful with float comparison — prefer normalized decimal string)
 
-## Padrão Delta / Spark (exemplo)
+## Delta / Spark pattern (example)
 
-Na Bronze, após expandir o array `dados` de cada ficheiro Raw:
+In Bronze, after expanding the `dados` array from each Raw file:
 
-1. Calcular `record_hash` = hash canónico das colunas acima (normalizadas).
-2. `dropDuplicates(["record_hash"])` ou `QUALIFY ROW_NUMBER() OVER (PARTITION BY record_hash ORDER BY _loaded_at DESC) = 1`.
+1. Compute `record_hash` = canonical hash of the columns above (normalized).
+2. `dropDuplicates(["record_hash"])` or `QUALIFY ROW_NUMBER() OVER (PARTITION BY record_hash ORDER BY _loaded_at DESC) = 1`.
 
-## Padrão SQL (Delta Lake)
+## SQL pattern (Delta Lake)
 
 ```sql
--- Exemplo ilustrativo: ajustar nomes de colunas ao schema real da API na Bronze.
+-- Illustrative: adjust column names to the real API schema in Bronze.
 CREATE OR REPLACE TEMP VIEW ceap_dedup AS
 SELECT *
 FROM (
@@ -42,7 +42,7 @@ FROM (
 WHERE rn = 1;
 ```
 
-## Notas
+## Notes
 
-- A camada **Raw** mantém o payload integral; a deduplicação é responsabilidade da Bronze/Silver.
-- Se a API alterar campos, versionar a lógica de `record_hash` e documentar mudança.
+- **Raw** keeps the full payload; deduplication is Bronze/Silver responsibility.
+- If the API fields change, version the `record_hash` logic and document the change.

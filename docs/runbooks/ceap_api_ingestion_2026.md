@@ -1,165 +1,163 @@
-# Runbook — Falha na ingestão CEAP API 2026
+# Runbook — CEAP API ingestion failure (2026 pipeline)
 
-## Objetivo
+## Purpose
 
-Restaurar a ingestão resiliente de despesas CEAP via API da Câmara (Dados Abertos) para o ano configurado em **`CEAP_TARGET_YEAR`** (predefinição **2026**), com recuperação granular por deputado e mês, sem recarregar histórico 2019–2025 (esse período usa ficheiros estáticos).
+Restore resilient CEAP expense ingestion via the Chamber of Deputies Open Data API for the year set in **`CEAP_TARGET_YEAR`** (default **2026**), with granular recovery per deputy and month, without reloading history 2019–2025 (that period uses static files).
 
-## Escopo
+## Scope
 
-- **Incluído**: endpoint CEAP/despesas por `id_deputado`, `ano`, `mes`; paginação; escrita em ADLS Raw; estado por partição em **IngestionState**; corridas agregadas e lock do dispatcher em **IngestionControlApi2026**; filas de trabalho e poison.
-- **Fora de escopo**: Bronze/Silver automáticos neste runbook (ver deduplicação em `docs/pipelines/ceap_deduplication_bronze_silver.md`).
+- **In scope**: CEAP `/despesas` endpoint per `id_deputado`, `ano`, `mes`; pagination; writes to ADLS Raw; per-partition state in **IngestionState**; aggregate runs and dispatcher lock in **IngestionControlApi2026**; work and poison queues.
+- **Out of scope**: automatic Bronze/Silver in this runbook (see deduplication in `docs/pipelines/ceap_deduplication_bronze_silver.md`).
 
-## Visão geral de modos (dispatcher)
+## Dispatcher modes overview
 
-O dispatcher executa em **duas fases por tick**:
+The dispatcher runs in **two phases per tick**:
 
-1. **Fase A — snapshot de deputados**: garante uma cópia válida de `/deputados`. Antes de chamar a API, consulta `IngestionControlApi2026._snapshots/deputados_YYYYMMDD` e o marcador `_SUCCESS` no Raw. Se o snapshot da `reference_date` atual já está `COMPLETED` (e válido), **reaproveita-o em memória sem chamar a API**. Em modo `reconciliation`, se a `reference_date` atual ainda não tem snapshot completo, faz fallback para o snapshot `COMPLETED` mais recente. Caso contrário, chama `GET /deputados` paginado, persiste cada página em Raw, escreve `metadata.json` + `_SUCCESS` no fim e atualiza `_snapshots`. Isto evita chamar `/deputados` a cada 20 min.
-2. **Fase B — enfileiramento CEAP**: percorre a lista de deputados in-memory em chunks de 100, gera mensagens CEAP por deputado × mês, respeita o limite de **`CEAP_MAX_TASKS_PER_DISPATCH`** (default 1000) e atualiza `IngestionState` por partição.
+1. **Phase A — deputy snapshot**: ensures a valid copy of `/deputados`. Before calling the API it checks `IngestionControlApi2026._snapshots/deputados_YYYYMMDD` and the `_SUCCESS` marker in Raw. If the snapshot for the current `reference_date` is already `COMPLETED` (and valid), **it reuses it in memory without calling the API**. In `reconciliation` mode, if the current `reference_date` has no complete snapshot yet, it falls back to the latest `COMPLETED` snapshot. Otherwise it calls paginated `GET /deputados`, persists each page to Raw, writes `metadata.json` + `_SUCCESS` at the end, and updates `_snapshots`. This avoids calling `/deputados` every 20 minutes.
+2. **Phase B — CEAP enqueue**: walks the in-memory deputy list in chunks of 100, builds CEAP messages per deputy × month, respects **`CEAP_MAX_TASKS_PER_DISPATCH`** (default 1000), and updates **IngestionState** per partition.
 
-O timer **`ceap_api_2026_dispatcher`** (agenda em **`CEAP_API_2026_DISPATCH_SCHEDULE`**, predefinição a cada 20 minutos, UTC) escolhe o modo pela **data UTC**:
+The **`ceap_api_2026_dispatcher`** timer (schedule **`CEAP_API_2026_DISPATCH_SCHEDULE`**, default every 20 minutes UTC) picks the mode from the **UTC date**:
 
-| Situação | Modo | Meses enfileirados | `pipeline_run_id` (exemplo) |
-|----------|------|----------------------|-------------------------------|
-| Dia ≠ `CEAP_RECONCILIATION_DAY` (default **25**) | **daily** | Mês corrente + meses anteriores na janela (`CEAP_DAILY_LOOKBACK_MONTHS`), sem meses futuros | `ceap_daily_YYYYMMDD` |
-| Dia = `CEAP_RECONCILIATION_DAY` | **reconciliation** | De `CEAP_RECONCILIATION_START_MONTH` até ao mês atual do ano alvo | `ceap_reconciliation_YYYYMMDD` |
+| Condition | Mode | Months enqueued | `pipeline_run_id` (example) |
+|-----------|------|-----------------|-----------------------------|
+| Day ≠ `CEAP_RECONCILIATION_DAY` (default **25**) | **daily** | Current month + earlier months in the window (`CEAP_DAILY_LOOKBACK_MONTHS`), no future months | `ceap_daily_YYYYMMDD` |
+| Day = `CEAP_RECONCILIATION_DAY` | **reconciliation** | From `CEAP_RECONCILIATION_START_MONTH` through the current month of the target year | `ceap_reconciliation_YYYYMMDD` |
 
-Nesse dia de reconciliação **não** corre o fluxo daily; só reconciliation. Após o run do dia estar **COMPLETED** (e, quando há tarefas, os workers terem concluído os contadores), execuções seguintes do timer no mesmo dia apenas registam log e **não** enfileiram de novo.
+On reconciliation day the **daily** flow does **not** run; only reconciliation. After that day’s run is **COMPLETED** (and, when there are tasks, workers have finished counters), later timer invocations the same day only log and **do not** enqueue again.
 
-O dispatcher usa **lock** na tabela de controlo (`PartitionKey=_locks`, `RowKey=ceap_dispatcher_lock`, TTL ~15 minutos) para evitar execuções concorrentes.
+The dispatcher uses a **lock** on the control table (`PartitionKey=_locks`, `RowKey=ceap_dispatcher_lock`, TTL ~15 minutes) to avoid concurrent runs.
 
-## Componentes principais
+## Main components
 
-| Componente | Função |
-|------------|--------|
-| `ceap_api_2026_dispatcher` | Timer: garante snapshot diário de `/deputados` em Raw + `IngestionControlApi2026._snapshots` (reusa quando `COMPLETED`); depois enfileira até **`CEAP_MAX_TASKS_PER_DISPATCH`** mensagens por execução (fallback: `CEAP_DISPATCH_MAX_MESSAGES`). Atualiza corridas em `_runs` e estado das partições em **IngestionState**. |
-| `ceap_api_2026_worker` | Queue trigger: uma mensagem = deputado + ano + mês + `mode` + `pipeline_run_id`; paginação; checkpoint na **IngestionState**; grava Raw com caminho por run. |
-| `ceap_api_2026_poison_handler` | Queue trigger na fila poison: marca a partição como **`POISON`** na **IngestionState** e incrementa falhas no run automatizado quando aplicável. |
-| `fn_replay_ceap_failed_messages` | HTTP (`authLevel=function`, rota `replay/ceap-api-2026`): reenfileira partições a partir da **IngestionState** (não usa a tabela de unidades antiga). |
-| `IngestionState` | Partição **`ceap_2026`**; `RowKey` = `despesas\|{id_deputado}\|{ano}\|{mes}`. Estados típicos: `QUEUED`, `RUNNING`, `SUCCESS`, `FAILED`, `POISON`, etc. |
-| `IngestionControlApi2026` | **`_runs`**: controlo por `pipeline_run_id` (contadores, cursores do dispatcher, `enqueue_phase_complete`). **`_locks`**: lock do dispatcher. |
-| Filas `ceap-api-2026-work` e `ceap-api-2026-work-poison` | Trabalho e falhas persistentes após retries (`host.json` / `maxDequeueCount`). |
-| `AzureWebJobsStorage` | Connection string principal da Function App; usada pelos **queue triggers** (`ceap_api_2026_worker` e `ceap_api_2026_poison_handler`). |
-| `CEAP_QUEUE_STORAGE` | Opcional para clientes de fila no código (dispatcher/replay); os listeners de trigger usam `AzureWebJobsStorage`. |
-| Application Insights | Logs JSON estruturados (`execution_id`, `pipeline_run_id`, `mode`, `id_deputado`, `mes`, `raw_path`, etc.). |
+| Component | Role |
+|-----------|------|
+| `ceap_api_2026_dispatcher` | Timer: ensures daily `/deputados` snapshot in Raw + `IngestionControlApi2026._snapshots` (reuses when `COMPLETED`); then enqueues up to **`CEAP_MAX_TASKS_PER_DISPATCH`** messages per invocation (fallback: `CEAP_DISPATCH_MAX_MESSAGES`). Updates runs in `_runs` and partition state in **IngestionState**. |
+| `ceap_api_2026_worker` | Queue trigger: one message = deputy + year + month + `mode` + `pipeline_run_id`; pagination; checkpoint in **IngestionState**; writes Raw under a per-run path. |
+| `ceap_api_2026_poison_handler` | Queue trigger on poison queue: sets partition **`POISON`** in **IngestionState** and increments failures on the automated run when applicable. |
+| `fn_replay_ceap_failed_messages` | HTTP (`authLevel=function`, route `replay/ceap-api-2026`): re-enqueues partitions from **IngestionState** (not the legacy unit table). |
+| `IngestionState` | Partition **`ceap_2026`**; `RowKey` = `despesas|{id_deputado}|{ano}|{mes}`. Typical states: `QUEUED`, `RUNNING`, `SUCCESS`, `FAILED`, `POISON`, etc. |
+| `IngestionControlApi2026` | **`_runs`**: control per `pipeline_run_id` (counters, dispatcher cursors, `enqueue_phase_complete`). **`_locks`**: dispatcher lock. |
+| Queues `ceap-api-2026-work` and `ceap-api-2026-work-poison` | Work and persistent failures after retries (`host.json` / `maxDequeueCount`). |
+| `AzureWebJobsStorage` | Primary Function App connection string; used by **queue triggers** (`ceap_api_2026_worker` and `ceap_api_2026_poison_handler`). |
+| `CEAP_QUEUE_STORAGE` | Optional for queue clients in code (dispatcher/replay); trigger listeners use `AzureWebJobsStorage`. |
+| Application Insights | Structured JSON logs (`execution_id`, `pipeline_run_id`, `mode`, `id_deputado`, `mes`, `raw_path`, etc.). |
 
-### App settings relevantes (resumo)
+### Relevant app settings (summary)
 
-| Setting | Papel |
-|---------|--------|
-| `CEAP_TARGET_YEAR` | Ano da API CEAP (default 2026). |
-| `CEAP_API_2026_DISPATCH_SCHEDULE` | CRON do dispatcher (default `0 */20 * * * *`). |
-| `CEAP_RECONCILIATION_DAY` | Dia UTC dedicado à reconciliação mensual (default 25). |
-| `CEAP_DAILY_LOOKBACK_MONTHS` | Quantos meses para trás incluir na janela daily (default 1). |
-| `CEAP_STALE_AFTER_MINUTES` | Janela para considerar `QUEUED`/`RUNNING` como órfãos (default 60; em dev pode usar 5 para teste rápido). |
-| `CEAP_REFERENCE_TIMEZONE` | Fuso usado só no segmento `reference_date` dos blobs Raw de deputados (default `America/Sao_Paulo`). O modo daily/reconciliation continua por **data UTC**. |
-| `CEAP_RECONCILIATION_START_MONTH` | Primeiro mês na reconciliação (default 1). |
-| `CEAP_MAX_TASKS_PER_DISPATCH` | Limite de mensagens de despesas (CEAP) enfileiradas por execução do dispatcher (default 1000). Não afeta a coleta do snapshot de deputados. |
-| `CEAP_API_QUEUE_NAME` / `CEAP_API_POISON_QUEUE_NAME` | Nomes das filas. |
-| `INGESTION_STATE_TABLE` / `INGESTION_CONTROL_TABLE` | Nomes das tabelas (se sobrespostos no ambiente). |
-| `CEAP_REPROCESS_QUEUE` | Se `true`, o worker pode voltar a processar uma partição já `SUCCESS` para o mesmo `pipeline_run_id` (uso raro). |
+| Setting | Purpose |
+|---------|---------|
+| `CEAP_TARGET_YEAR` | CEAP API year (default 2026). |
+| `CEAP_API_2026_DISPATCH_SCHEDULE` | Dispatcher CRON (default `0 */20 * * * *`). |
+| `CEAP_RECONCILIATION_DAY` | UTC day for monthly reconciliation (default 25). |
+| `CEAP_DAILY_LOOKBACK_MONTHS` | How many past months to include in the daily window (default 1). |
+| `CEAP_STALE_AFTER_MINUTES` | Window to treat `QUEUED`/`RUNNING` as stale (default 60; use 5 in dev for quick tests). |
+| `CEAP_REFERENCE_TIMEZONE` | Time zone used only for the `reference_date` segment of Raw deputy blobs (default `America/Sao_Paulo`). Daily/reconciliation mode still follows **UTC date**. |
+| `CEAP_RECONCILIATION_START_MONTH` | First month in reconciliation (default 1). |
+| `CEAP_MAX_TASKS_PER_DISPATCH` | Max CEAP expense messages enqueued per dispatcher run (default 1000). Does not affect deputy snapshot collection. |
+| `CEAP_API_QUEUE_NAME` / `CEAP_API_POISON_QUEUE_NAME` | Queue names. |
+| `INGESTION_STATE_TABLE` / `INGESTION_CONTROL_TABLE` | Table names if overridden in the environment. |
+| `CEAP_REPROCESS_QUEUE` | If `true`, worker may reprocess a partition already `SUCCESS` for the same `pipeline_run_id` (rare). |
 
-## Sintomas de falha
+## Failure symptoms
 
-- Crescimento da fila poison ou mensagens presas na fila principal por longos períodos.
-- Partições em **IngestionState** com `FAILED` estável, **`POISON`**, ou **`RUNNING`** sem progresso (por exemplo após incidente).
-- Lacunas no Raw no prefixo abaixo (varia por `pipeline_run_id` e `execution_id`).
-- Erros 429/5xx recorrentes nos logs; 401/403 indicam identidade/RBAC no ADLS.
+- Poison queue growth or messages stuck on the main queue for long periods.
+- **IngestionState** partitions stuck in stable **`FAILED`**, **`POISON`**, or **`RUNNING`** without progress (for example after an incident).
+- Gaps in Raw under the prefix below (varies by `pipeline_run_id` and `execution_id`).
+- Recurring 429/5xx in logs; 401/403 indicate identity/RBAC on ADLS.
 
-## Caminho Raw (ADLS)
+## Raw path (ADLS)
 
-O worker grava ficheiros no formato:
+The worker writes files in this layout:
 
 ```text
 raw/camara/ceap/api/despesas/reference_year={ano}/reference_month={MM}/
   pipeline_run_id={pipeline_run_id}/execution_id={execution_id}/deputado_id={id}/page_{n}.json
 ```
 
-Cada execução da função gera um **`execution_id`** novo; repetir a mesma competência noutro run produz prefixos distintos (sem sobrescrever blobs de outro run).
+Each function invocation gets a new **`execution_id`**; repeating the same period in another run produces distinct prefixes (no overwrite of another run’s blobs).
 
-O dispatcher também grava snapshots da listagem de deputados (fonte de dispatch e base para futura dimensão):
+The dispatcher also writes snapshots of the deputy list (dispatch source and future dimension base):
 
 ```text
 raw/camara/deputados/api/list/reference_date={YYYY-MM-DD}/
   pipeline_run_id={pipeline_run_id}/execution_id={snapshot_execution_id}/page_{n}.json
   metadata.json
-  _SUCCESS                       # apenas quando o snapshot fica completo
+  _SUCCESS                       # only when the snapshot is complete
 ```
 
-O `{YYYY-MM-DD}` é a **data civil** no fuso `CEAP_REFERENCE_TIMEZONE` (predefinição `America/Sao_Paulo`), não a data UTC — assim as pastas alinham com o calendário brasileiro. O `snapshot_execution_id` é estável dentro do mesmo `pipeline_run_id` (todas as páginas do mesmo run vão para a mesma subpasta `execution_id=...`, mesmo quando o dispatcher percorre a paginação ao longo de múltiplos ticks).
+`{YYYY-MM-DD}` is the **civil date** in `CEAP_REFERENCE_TIMEZONE` (default `America/Sao_Paulo`), not UTC — folders align with the Brazilian calendar. `snapshot_execution_id` is stable within the same `pipeline_run_id` (all pages of the same run go under the same `execution_id=...` subfolder even when pagination spans multiple ticks).
 
-### Validação de snapshot de deputados
+### Deputy snapshot validation
 
-Em cada tick o dispatcher escreve/atualiza `metadata.json` no nível `reference_date={YYYY-MM-DD}/` com o estado corrente. Quando a paginação do `/deputados` chega ao fim (resposta vazia), além de gravar a `metadata.json` com `status=COMPLETED`, é criado o marcador `_SUCCESS` na mesma pasta.
+Each tick the dispatcher writes/updates `metadata.json` at `reference_date={YYYY-MM-DD}/` with current state. When `/deputados` pagination ends (empty response), besides `metadata.json` with `status=COMPLETED`, a `_SUCCESS` marker is created in the same folder.
 
-Campos do `metadata.json`:
+`metadata.json` fields:
 
-| Campo | Descrição |
-|-------|-----------|
-| `endpoint` | Sempre `deputados`. |
-| `reference_date` | Data civil (`CEAP_REFERENCE_TIMEZONE`) usada na pasta. |
-| `reference_timezone` | Fuso aplicado para gerar `reference_date`. |
-| `pipeline_run_id` | Run que gerou esta cópia. |
-| `execution_id` | `snapshot_execution_id` (subpasta `execution_id=...`). |
-| `status` | `IN_PROGRESS` ou `COMPLETED`. |
-| `total_pages` / `record_count` | Acumulado do snapshot. |
-| `files_written` | Igual a `total_pages` quando o snapshot está consistente. |
-| `started_at` / `completed_at` | Marcas temporais (ISO UTC) do run. |
-| `error_message` | Em branco quando não há falha. |
+| Field | Description |
+|-------|-------------|
+| `endpoint` | Always `deputados`. |
+| `reference_date` | Civil date (`CEAP_REFERENCE_TIMEZONE`) used in the folder. |
+| `reference_timezone` | Time zone used to derive `reference_date`. |
+| `pipeline_run_id` | Run that produced this copy. |
+| `execution_id` | `snapshot_execution_id` (`execution_id=...` subfolder). |
+| `status` | `IN_PROGRESS` or `COMPLETED`. |
+| `total_pages` / `record_count` | Snapshot totals. |
+| `files_written` | Equals `total_pages` when the snapshot is consistent. |
+| `started_at` / `completed_at` | Timestamps (ISO UTC). |
+| `error_message` | Empty when there is no failure. |
 
-Um snapshot só é considerado **válido para consumo** quando, simultaneamente:
+A snapshot is **valid for use** only when **all** of the following hold:
 
-- existe `_SUCCESS` na pasta `reference_date={YYYY-MM-DD}/`;
+- `_SUCCESS` exists under `reference_date={YYYY-MM-DD}/`;
 - `metadata.status = COMPLETED`;
 - `record_count > 0`;
 - `total_pages > 0`;
 - `files_written == total_pages`.
 
-Se a pasta da data corrente não cumpre todos esses critérios, o dispatcher **não** a usa como referência: emite `warning` e procura a pasta `reference_date=...` mais recente que satisfaça as regras acima como **fallback**. O run no `IngestionControlApi2026._runs` regista a escolha:
+If the current date’s folder fails any criterion, the dispatcher **does not** use it as reference: it logs a warning and picks the latest `reference_date=...` folder that satisfies the rules as **fallback**. The run row in `IngestionControlApi2026._runs` records the choice:
 
-| Campo no run | Significado |
-|---------------|-------------|
-| `deputies_pages_written` / `deputies_records_count` | Acumulado escrito para o snapshot do dia atual (mesmo que ainda incompleto). |
-| `deputies_snapshot_status` | `IN_PROGRESS` enquanto o dispatcher está a paginar; `COMPLETED` após `_SUCCESS`. |
-| `deputies_snapshot_first_execution_id` | `snapshot_execution_id` do snapshot que está a ser construído. |
-| `deputies_snapshot_date` / `deputies_snapshot_path` / `deputies_snapshot_record_count` | Apontam para o snapshot **válido** que o run usa como referência (corrente quando completo, ou fallback). |
-| `deputies_snapshot_source` | `current_run`, `fallback_completed` ou `none`. |
-| `deputies_snapshot_completed_at` | Carimbo do momento em que `_SUCCESS` foi escrito. |
+| Run field | Meaning |
+|-----------|---------|
+| `deputies_pages_written` / `deputies_records_count` | Accumulated writes for today’s snapshot (even if still incomplete). |
+| `deputies_snapshot_status` | `IN_PROGRESS` while paginating; `COMPLETED` after `_SUCCESS`. |
+| `deputies_snapshot_first_execution_id` | `snapshot_execution_id` of the snapshot being built. |
+| `deputies_snapshot_date` / `deputies_snapshot_path` / `deputies_snapshot_record_count` | Point to the **valid** snapshot the run uses (current when complete, or fallback). |
+| `deputies_snapshot_source` | `current_run`, `fallback_completed`, or `none`. |
+| `deputies_snapshot_completed_at` | When `_SUCCESS` was written. |
 
-## Consultar logs (Application Insights)
+## Logs (Application Insights)
 
-1. Portal Azure → Function App (ex.: `func-legisflow-ingestion-dev`) → Application Insights → **Logs**.
-2. Procurar `traces` com JSON: `pipeline_run_id`, `mode`, `execution_id`, `id_deputado`, `ano`, `mes`, `final_status`, `raw_path`, `pages_processed`, `record_count`.
-3. Filtrar por nome da função (`ceap_api_2026_worker`, `ceap_api_2026_dispatcher`, `ceap_api_2026_poison_handler`).
+1. Azure Portal → Function App (e.g. `func-legisflow-ingestion-dev`) → Application Insights → **Logs**.
+2. Search `traces` with JSON: `pipeline_run_id`, `mode`, `execution_id`, `id_deputado`, `ano`, `mes`, `final_status`, `raw_path`, `pages_processed`, `record_count`.
+3. Filter by function name (`ceap_api_2026_worker`, `ceap_api_2026_dispatcher`, `ceap_api_2026_poison_handler`).
 
-## Consultar IngestionState (partição por deputado/mês)
+## IngestionState (partition per deputy/month)
 
-- Storage Account da **Function App** → **Tables** → `IngestionState` (ou o valor de `INGESTION_STATE_TABLE`).
+- **Function App** storage account → **Tables** → `IngestionState` (or `INGESTION_STATE_TABLE`).
 - **`PartitionKey`**: `ceap_2026`.
-- **`RowKey`**: `despesas|{id_deputado}|{ano}|{mes}` (pipe como separador).
-- Campos úteis: `status`, `current_pipeline_run_id`, `last_mode`, `last_successful_page`, `last_error`, `last_dispatched_at`, `last_finished_at`, `record_count`, `raw_path`.
+- **`RowKey`**: `despesas|{id_deputado}|{ano}|{mes}` (pipe separator).
+- Useful fields: `status`, `current_pipeline_run_id`, `last_mode`, `last_successful_page`, `last_error`, `last_dispatched_at`, `last_finished_at`, `record_count`, `raw_path`.
 
-### Identificar falhas
+### Finding failures
 
-Filtrar por `status` em **`FAILED`**, **`POISON`**, ou inspeccionar **`RUNNING`** antigo (timestamp `last_started_at` / `updated_at`).
+Filter `status` in **`FAILED`**, **`POISON`**, or inspect stale **`RUNNING`** (`last_started_at` / `updated_at`).
 
-## Consultar IngestionControlApi2026 (corridas e lock)
+## IngestionControlApi2026 (runs and lock)
 
-- Mesma storage → Tabela `IngestionControlApi2026`.
-- **`PartitionKey=_runs`**, **`RowKey`**: `ceap_daily_YYYYMMDD` ou `ceap_reconciliation_YYYYMMDD` — resumo consolidado da corrida.
-  - Campos: `run_type`, `status`, `target_year`, `months_to_process`, `enqueue_phase_complete`, `total_tasks_expected`, `total_tasks_queued`, `total_tasks_success`, `total_tasks_failed`, `total_tasks_running`, `total_tasks_pending`, `total_tasks_poison`, `started_at`, `updated_at`, `completed_at`, `last_error`, cursores `next_pagina`, `next_idx`, `next_month_idx`.
-  - Campos do snapshot de deputados: `deputies_pages_written`, `deputies_records_count`, `deputies_snapshot_status`, `deputies_snapshot_first_execution_id`, `deputies_snapshot_date`, `deputies_snapshot_path`, `deputies_snapshot_record_count`, `deputies_snapshot_source` (`reused_today` | `reused_fallback` | `created_today` | `none`), `deputies_snapshot_completed_at`.
-  - Status possíveis: `STARTED`, `QUEUING`, `QUEUED`, `RUNNING`, `COMPLETED`, `PARTIAL`, `FAILED`.
-  - **Sucesso confirmado** apenas quando: `status=COMPLETED`, `total_tasks_success == total_tasks_expected`, `total_tasks_failed=0`, `total_tasks_poison=0`, `total_tasks_running=0`, `total_tasks_pending=0`.
-- **`PartitionKey=_locks`**, **`RowKey=ceap_dispatcher_lock`** — lock ativo do dispatcher (`locked_until`, `locked_by`).
-- **`PartitionKey=_snapshots`**, **`RowKey=deputados_YYYYMMDD`** — controle do snapshot diário de `/deputados` (independente do run CEAP).
-  - Campos: `endpoint=deputados`, `reference_date`, `status` (`IN_PROGRESS` | `COMPLETED` | `FAILED`), `pipeline_run_id`, `execution_id`, `started_at`, `completed_at`, `total_pages`, `record_count`, `raw_path`, `last_error`, `updated_at`.
-  - O dispatcher só **reaproveita** o snapshot quando: `status=COMPLETED`, `record_count>0`, `total_pages>0`, `raw_path` preenchido **e** o marcador `_SUCCESS` existe em `raw_path/_SUCCESS`.
-  - O modo `daily` reusa o snapshot do dia atual; se não existir, cria um novo.
-  - O modo `reconciliation` reusa o snapshot completo mais recente (com `reference_date < hoje`) quando o do dia atual ainda não está completo; se nenhum estiver válido, cria um novo antes da Fase B.
+- Same storage → table `IngestionControlApi2026`.
+- **`PartitionKey=_runs`**, **`RowKey`**: `ceap_daily_YYYYMMDD` or `ceap_reconciliation_YYYYMMDD` — consolidated run summary.
+  - Fields: `run_type`, `status`, `target_year`, `months_to_process`, `enqueue_phase_complete`, `total_tasks_expected`, `total_tasks_queued`, `total_tasks_success`, `total_tasks_failed`, `total_tasks_running`, `total_tasks_pending`, `total_tasks_poison`, `started_at`, `updated_at`, `completed_at`, `last_error`, cursors `next_pagina`, `next_idx`, `next_month_idx`.
+  - Deputy snapshot fields: `deputies_pages_written`, `deputies_records_count`, `deputies_snapshot_status`, `deputies_snapshot_first_execution_id`, `deputies_snapshot_date`, `deputies_snapshot_path`, `deputies_snapshot_record_count`, `deputies_snapshot_source` (`reused_today` | `reused_fallback` | `created_today` | `none`), `deputies_snapshot_completed_at`.
+  - Possible statuses: `STARTED`, `QUEUING`, `QUEUED`, `RUNNING`, `COMPLETED`, `PARTIAL`, `FAILED`.
+  - **Confirmed success** only when: `status=COMPLETED`, `total_tasks_success == total_tasks_expected`, `total_tasks_failed=0`, `total_tasks_poison=0`, `total_tasks_running=0`, `total_tasks_pending=0`.
+- **`PartitionKey=_locks`**, **`RowKey=ceap_dispatcher_lock`** — active dispatcher lock (`locked_until`, `locked_by`).
+- **`PartitionKey=_snapshots`**, **`RowKey=deputados_YYYYMMDD`** — daily `/deputados` snapshot control (independent of the CEAP expense run).
+  - Fields: `endpoint=deputados`, `reference_date`, `status` (`IN_PROGRESS` | `COMPLETED` | `FAILED`), `pipeline_run_id`, `execution_id`, `started_at`, `completed_at`, `total_pages`, `record_count`, `raw_path`, `last_error`, `updated_at`.
+  - The dispatcher **reuses** a snapshot only when: `status=COMPLETED`, `record_count>0`, `total_pages>0`, `raw_path` set **and** `_SUCCESS` exists at `raw_path/_SUCCESS`.
+  - **`daily`** mode reuses today’s snapshot; if missing, creates a new one.
+  - **`reconciliation`** mode reuses the latest complete snapshot (`reference_date < today`) when today’s is not complete yet; if none is valid, creates a new one before Phase B.
 
-### Verificar conclusão com um único comando
-
-Daily:
+### One-command completion check (daily)
 
 ```bash
 az storage entity query \
@@ -170,7 +168,7 @@ az storage entity query \
   -o table
 ```
 
-Reconciliation:
+### Reconciliation
 
 ```bash
 az storage entity query \
@@ -181,76 +179,76 @@ az storage entity query \
   -o table
 ```
 
-## Verificar poison queue
+## Poison queue
 
-- Storage Account da Function → **Queues** → `ceap-api-2026-work-poison` (ou nome em `CEAP_API_POISON_QUEUE_NAME`).
-- Cada mensagem corresponde a uma partição que falhou após esgotar retries da fila principal.
-- O handler **`ceap_api_2026_poison_handler`** atualiza **IngestionState** para **`POISON`** (e o run automatizado, quando o `pipeline_run_id` é daily/reconciliation).
+- Function storage → **Queues** → `ceap-api-2026-work-poison` (or `CEAP_API_POISON_QUEUE_NAME`).
+- Each message is a partition that failed after exhausting main-queue retries.
+- Handler **`ceap_api_2026_poison_handler`** sets **IngestionState** to **`POISON`** (and the automated run when `pipeline_run_id` is daily/reconciliation).
 
-## Dispatcher automático vs partições em falha
+## Automatic dispatcher vs failing partitions
 
-- Para o **mesmo** `pipeline_run_id`, o dispatcher **não** duplica mensagens se a partição já está **`QUEUED`**, **`RUNNING`** ou **`SUCCESS`**.
-- Partições **`FAILED`** ou **`POISON`** podem ser cobertas por um **novo** run (outro dia ou outro `pipeline_run_id`) quando o dispatcher as voltar a visitar, ou por **replay HTTP** manual (ver abaixo).
-- A reconciliação mensal automática **não** substitui o replay: o replay é para recuperação operacional após correções ou investigação.
+- For the **same** `pipeline_run_id`, the dispatcher **does not** duplicate messages if the partition is already **`QUEUED`**, **`RUNNING`**, or **`SUCCESS`**.
+- **`FAILED`** or **`POISON`** partitions can be picked up by a **new** run (another day or another `pipeline_run_id`) when the dispatcher visits them again, or by **manual HTTP replay** (below).
+- Monthly automatic reconciliation **does not** replace replay: replay is for operational recovery after fixes or investigation.
 
-## Reprocessar mensagens (replay)
+## Reprocess messages (replay)
 
-Chamar a função HTTP com **function key** (Portal → Função → **Get Function Url** / chave).
+Call the HTTP function with the **function key** (Portal → Function → **Get Function Url** / key).
 
-**Rota:** `https://<function-app>.azurewebsites.net/api/replay/ceap-api-2026`
+**Route:** `https://<function-app>.azurewebsites.net/api/replay/ceap-api-2026`
 
-Parâmetros de query:
+Query parameters:
 
-| Parâmetro | Descrição |
-|-----------|-----------|
-| `code` | Obrigatório: function key. |
-| `statuses` | Lista separada por vírgulas (predefinição **`FAILED,POISON`**). |
-| `endpoint` | Predefinição `ceap`; use `*` para não filtrar por endpoint. |
-| `id_deputado`, `ano`, `mes` | Filtros opcionais. |
-| `full` | `true` para repor checkpoint de página (`last_successful_page` → 0) e refazer todas as páginas. |
-| `pipeline_run_id` | Opcional: força o valor na mensagem e na partição; se omitido, usa `ceap_replay_YYYYMMDD` (run manual não atualiza contadores de corridas daily/reconciliation da mesma forma que o pipeline automático). |
+| Parameter | Description |
+|-----------|-------------|
+| `code` | Required: function key. |
+| `statuses` | Comma-separated list (default **`FAILED,POISON`**). |
+| `endpoint` | Default `ceap`; use `*` to skip endpoint filter. |
+| `id_deputado`, `ano`, `mes` | Optional filters. |
+| `full` | `true` resets page checkpoint (`last_successful_page` → 0) and refetches all pages. |
+| `pipeline_run_id` | Optional: forces value on message and partition; if omitted, uses `ceap_replay_YYYYMMDD` (manual run does not update daily/reconciliation counters the same way as the automatic pipeline). |
 
-Exemplos:
+Examples:
 
-- Reprocessar todas as partições em falha:  
+- Reprocess all failing partitions:  
   `.../api/replay/ceap-api-2026?code=<key>&statuses=FAILED,POISON`
-- Um deputado:  
+- One deputy:  
   `.../api/replay/ceap-api-2026?code=<key>&statuses=FAILED&id_deputado=204521`
-- Um mês, com re-fetch completo:  
+- One month, full re-fetch:  
   `.../api/replay/ceap-api-2026?code=<key>&ano=2026&mes=3&full=true`
 
-## Validar recuperação
+## Validate recovery
 
-1. **IngestionState**: partição com `status=SUCCESS`, `last_finished_at` / `last_success_at` preenchidos quando aplicável.
-2. **Raw**: existem `page_{n}.json` para todas as páginas esperadas (última resposta sem link `next` na API).
-3. **IngestionControlApi2026** (`_runs`): para corridas automáticas, `total_tasks_success` / `total_tasks_failed` alinhados com o encerramento do run (`COMPLETED` ou `PARTIAL` quando há falhas).
-4. **Filas**: profundidade da fila principal a descer; poison sem novos itens repetidos para a mesma partição após tratamento.
+1. **IngestionState**: partition `status=SUCCESS`, `last_finished_at` / `last_success_at` set when applicable.
+2. **Raw**: `page_{n}.json` for all expected pages (last API response has no `next` link).
+3. **IngestionControlApi2026** (`_runs`): for automated runs, `total_tasks_success` / `total_tasks_failed` aligned with run closure (`COMPLETED` or `PARTIAL` when there are failures).
+4. **Queues**: main queue depth drops; poison has no repeated new items for the same partition after handling.
 
-## Erros por código HTTP
+## Errors by HTTP code
 
-| Código | Ação esperada |
-|--------|----------------|
-| 429, 5xx | Backoff na função (retry HTTP); depois retry da **fila**; em último caso **poison**. |
-| 400 | Rever parâmetros (`ano`, `mes`, `id_deputado`); marcar falha terminal na partição; corrigir dados e usar **replay** com `full=true` se aplicável. |
-| 401 / 403 | Rever RBAC da identidade gerida no ADLS e configuração da conta. |
-| 404 | Recurso inválido ou inexistente; validar `id_deputado` / competência. |
-| Timeout | Rever `functionTimeout` e limites da API; isolamento já é por mensagem (uma partição por mensagem). |
+| Code | Expected action |
+|------|-----------------|
+| 429, 5xx | Backoff in function (HTTP retry); then **queue** retry; last resort **poison**. |
+| 400 | Check parameters (`ano`, `mes`, `id_deputado`); terminal failure on partition; fix data and **replay** with `full=true` if needed. |
+| 401 / 403 | Review managed identity RBAC on ADLS and account configuration. |
+| 404 | Invalid or missing resource; validate `id_deputado` / period. |
+| Timeout | Review `functionTimeout` and API limits; isolation is already per message (one partition per message). |
 
-## Duplicidade e idempotência
+## Duplicates and idempotency
 
-- **Fila / estado**: o mesmo `pipeline_run_id` não gera mensagens duplicadas para a mesma partição enquanto está `QUEUED`/`RUNNING`/`SUCCESS`.
-- **Raw**: caminhos incluem `pipeline_run_id` e `execution_id`; runs diferentes não sobrepõem os mesmos blobs.
-- **Bronze/Silver** (quando existirem jobs): deduplicação semântica continua documentada em `docs/pipelines/ceap_deduplication_bronze_silver.md`.
+- **Queue / state**: same `pipeline_run_id` does not duplicate messages for the same partition while it is `QUEUED`/`RUNNING`/`SUCCESS`.
+- **Raw**: paths include `pipeline_run_id` and `execution_id`; different runs do not overwrite the same blobs.
+- **Bronze/Silver** (when jobs exist): semantic deduplication remains in `docs/pipelines/ceap_deduplication_bronze_silver.md`.
 
-## Encerramento do incidente
+## Close the incident
 
-- Filas estáveis; poison tratada ou mensagens conhecidas registadas.
-- Partições críticas em **`SUCCESS`** ou falhas aceites documentadas.
-- Registo de causa raiz, ações e follow-up (incluindo alinhamento Bronze/Silver quando essa camada existir).
+- Queues stable; poison cleared or known messages documented.
+- Critical partitions **`SUCCESS`** or accepted failures documented.
+- Root cause, actions, and follow-up recorded (including Bronze/Silver alignment when that layer exists).
 
-## Estratégia de tolerância a falhas (resumo)
+## Fault tolerance summary
 
-- **Timeout / 5xx / 429**: retry HTTP com backoff; falha da execução → retry da fila; após max dequeue → **poison** + partição **`POISON`** em IngestionState.
-- **400 / 401 / 403 / 404** (terminal onde aplicável): partição **`FAILED`** no worker; corrigir à origem; **replay HTTP**.
-- **Falha após gravar página**: retoma em `last_successful_page + 1` para o mesmo `pipeline_run_id`, ou `full=true` no replay para refazer todas as páginas.
-- **Falha isolada**: não bloqueia outros deputados/meses (mensagens independentes).
+- **Timeout / 5xx / 429**: HTTP retry with backoff; invocation failure → queue retry; after max dequeue → **poison** + partition **`POISON`** in IngestionState.
+- **400 / 401 / 403 / 404** (terminal where applicable): partition **`FAILED`** in worker; fix source; **HTTP replay**.
+- **Failure after writing a page**: resume at `last_successful_page + 1` for the same `pipeline_run_id`, or `full=true` on replay to refetch all pages.
+- **Isolated failure**: does not block other deputies/months (independent messages).

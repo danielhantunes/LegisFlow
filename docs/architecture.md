@@ -1,6 +1,6 @@
 # LegisFlow Architecture Overview
 
-**Estado do documento:** descreve a arquitetura alvo e o fluxo CEAP em detalhe. A partir de 2026 o mesmo Function App inclui **vários domínios** de ingestão (reference, votacoes, proposicoes, eventos, institucional, discursos) além do CEAP API 2026 — ver `docs/current_state.md` e `docs/pipeline_status.md` para lista e matriz de estado. A secção **12.1** abaixo foi atualizada para refletir o código atual; `docs/decisions.md` ADR-003 permanece como registo histórico da decisão MVP original.
+**About this document:** It describes the target architecture and the CEAP flow in detail. As of 2026 the same Function App hosts **multiple** ingestion domains (reference, votacoes, proposicoes, eventos, institucional, discursos) in addition to CEAP API 2026 — see `docs/current_state.md` and `docs/pipeline_status.md` for lists and status. Section **12.1** reflects the current code layout; `docs/decisions.md` ADR-003 remains the historical record of the original MVP decision.
 
 ## 1) Solution Goal
 
@@ -20,13 +20,13 @@ The architecture is production-oriented, but constrained to a portfolio-friendly
 
 The Python Function project under `functions/ceap_expenses_ingestion_timer/` now contains **timer dispatchers**, **queue workers**, **poison handlers**, and **HTTP replay/reset** helpers for:
 
-- **CEAP** (`ceap_api_2026_*`) — primary production path for deputado despesas
-- **reference** — dimension snapshots (partidos, legislaturas, deputados, frentes, orgaos)
-- **votacoes** — list + per-votação votos
-- **proposicoes** — list + autores + tramitações per proposição
-- **eventos** — list + per-evento deputados/orgaos/pauta/votacoes
+- **CEAP** (`ceap_api_2026_*`) — primary production path for deputy expense (CEAP) data
+- **reference** — dimension snapshots (parties, legislatures, deputies, frentes, orgaos)
+- **votacoes** — list `/votacoes` + per roll-call `votos`
+- **proposicoes** — list + authors + procedural history (`tramitacoes`) per bill
+- **eventos** — list + per-event deputados/orgaos/pauta/votacoes
 - **institucional** — daily fanout from orgaos/partidos/frentes/legislaturas to membros/lideres/mesa
-- **discursos** — deputies snapshot + per-deputado discursos window
+- **discursos** — deputies snapshot + per-deputy discursos window
 
 Declarative configuration lives in `shared/domain_catalog.py`. Queues and app settings are provisioned in Terraform module `infra/terraform/ingestion`.
 
@@ -56,19 +56,19 @@ The architecture uses separate resource groups for workload and Terraform backen
 
 ## 5) End-to-End Data Flow
 
-1. **CEAP API 2026 (MVP atual)**: o timer `ceap_api_2026_dispatcher` (a cada 20 minutos, UTC) decide o modo por data: em dias normais **daily** (janela móvel: mês corrente + o mês anterior, limitado a `CEAP_DAILY_LOOKBACK_MONTHS`); no dia `CEAP_RECONCILIATION_DAY` (padrão 25) roda só **reconciliation** (janeiro → mês atual, sem daily nesse dia). O dispatcher enfileira lotes de até `CEAP_MAX_TASKS_PER_DISPATCH` para a fila `ceap-api-2026-work`, grava o run em `IngestionControlApi2026` (`_runs` + contadores) e usa **lock** de 15 min em `_locks/ceap_dispatcher_lock` para evitar concorrência. O mesmo dispatcher trata `/deputados` como **snapshot diário**: cada tick verifica primeiro `IngestionControlApi2026._snapshots/deputados_YYYYMMDD` e o marcador `_SUCCESS` em Raw — se o snapshot já estiver `COMPLETED` (`record_count>0`, `total_pages>0`, `raw_path` preenchido), o dispatcher carrega-o em memória e **não chama** `/deputados` nesse ciclo. Em modo `reconciliation` há fallback automático para o snapshot completo mais recente quando o do dia atual ainda não está pronto. Só quando nenhum snapshot válido existe é que paginação real ocorre, gravando em `raw/camara/deputados/api/list/reference_date={YYYY-MM-DD}/pipeline_run_id=.../execution_id=.../page_{n}.json` (com `reference_date` em `CEAP_REFERENCE_TIMEZONE`, predefinição `America/Sao_Paulo`), seguido por `metadata.json` + `_SUCCESS` na pasta da data e atualização de `_snapshots`. O run CEAP regista em `deputies_snapshot_*` o snapshot efetivamente usado e os flags `snapshot_reused`/`snapshot_created`. Após o run do dia ganhar `enqueue_phase_complete` e, quando houver tarefas, o processamento atingir conclusão no registo do run, execuções subsequentes no mesmo dia **não** reenfileiram. Cada mensagem inclui `mode`, `pipeline_run_id` (ex.: `ceap_daily_YYYYMMDD` / `ceap_reconciliation_YYYYMMDD`) e `dispatched_at`.
-2. **Worker** `ceap_api_2026_worker` trata **daily** e **reconciliation** da mesma fila: paginação em `/deputados/{id}/despesas`, checkpoint na tabela **IngestionState** (`PartitionKey=ceap_2026`, `RowKey=despesas|{id}|{ano}|{mes}`), contadores de run automatizado em `IngestionControlApi2026` quando `pipeline_run_id` é daily/reconciliation, e Raw em ADLS com `reference_year` / `reference_month` / `pipeline_run_id` / `execution_id` / `deputado_id` / `page_{n}.json` para evitar sobrescrita entre runs.
-3. **Poison** `ceap-api-2026-work-poison` + `ceap_api_2026_poison_handler` marcam a partição como **POISON** em IngestionState e incrementam falhas no run automatizado quando aplicável.
-4. **Replay** HTTP `fn_replay_ceap_failed_messages` lê **IngestionState** (estados como FAILED/POISON), reenfileira com `pipeline_run_id` opcional ou `ceap_replay_YYYYMMDD`, e **não** substitui a reconciliação mensal; serve só para reprocessamento manual. Runbook: `docs/runbooks/ceap_api_ingestion_2026.md`.
-5. **Histórico 2019–2025**: ficheiros estáticos (fora deste fluxo API).
-6. **Legado desativado**: `ceap_expenses_ingestion_timer` monolítico permanece no pacote mas desativado por predefinição (`AzureWebJobs...Disabled` + `CEAP_LEGACY_MONOLITH_ENABLED=false`); só para emergência.
-7. Databricks jobs materializam Bronze → Silver → Gold Delta layers; deduplicação CEAP API descrita em `docs/pipelines/ceap_deduplication_bronze_silver.md`. Consumo Bronze/Delta dos **novos** prefixos RAW (fora CEAP) não está descrito neste ficheiro como concluído — ver `docs/pipeline_status.md`.
+1. **CEAP API 2026 (current MVP path):** The `ceap_api_2026_dispatcher` timer (default every 20 minutes UTC) picks the mode by calendar date: on normal days **daily** (rolling window: current month + prior month, bounded by `CEAP_DAILY_LOOKBACK_MONTHS`); on `CEAP_RECONCILIATION_DAY` (default 25) only **reconciliation** runs (January through current month — no daily on that day). The dispatcher enqueues batches up to `CEAP_MAX_TASKS_PER_DISPATCH` to `ceap-api-2026-work`, persists the run in `IngestionControlApi2026` (`_runs` and counters), and uses a ~15-minute **lock** on `_locks/ceap_dispatcher_lock` to avoid concurrent ticks. The same dispatcher treats `/deputados` as a **daily snapshot:** each tick first checks `IngestionControlApi2026._snapshots/deputados_YYYYMMDD` and the `_SUCCESS` marker in Raw — if the snapshot is already `COMPLETED` (`record_count>0`, `total_pages>0`, `raw_path` set), it loads deputies in memory and **does not call** `/deputados` that cycle. In `reconciliation` there is automatic fallback to the latest complete snapshot when today’s is not ready. Real pagination runs only when no valid snapshot exists, writing under `raw/camara/deputados/api/list/reference_date={YYYY-MM-DD}/pipeline_run_id=.../execution_id=.../page_{n}.json` (`reference_date` uses `CEAP_REFERENCE_TIMEZONE`, default `America/Sao_Paulo`), then `metadata.json` + `_SUCCESS` and `_snapshots` updates. The CEAP run stores the effective snapshot in `deputies_snapshot_*` fields plus `snapshot_reused` / `snapshot_created`. After the day’s run reaches `enqueue_phase_complete` and (when there is work) the run record shows completion, further ticks the same day **do not** enqueue again. Each queue message carries `mode`, `pipeline_run_id` (e.g. `ceap_daily_YYYYMMDD` / `ceap_reconciliation_YYYYMMDD`), and `dispatched_at`.
+2. **Worker** `ceap_api_2026_worker` handles **daily** and **reconciliation** from the same queue: pagination on `/deputados/{id}/despesas`, checkpoints in **IngestionState** (`PartitionKey=ceap_2026`, `RowKey=despesas|{id}|{ano}|{mes}`), automated run counters in `IngestionControlApi2026` when `pipeline_run_id` is daily/reconciliation, and Raw in ADLS with `reference_year` / `reference_month` / `pipeline_run_id` / `execution_id` / `deputado_id` / `page_{n}.json` so runs do not overwrite each other.
+3. **Poison** `ceap-api-2026-work-poison` + `ceap_api_2026_poison_handler` mark the partition **POISON** in IngestionState and increment failures on the automated run when applicable.
+4. **Replay** HTTP `fn_replay_ceap_failed_messages` reads **IngestionState** (e.g. FAILED/POISON), re-enqueues with optional `pipeline_run_id` or `ceap_replay_YYYYMMDD`; it **does not** replace scheduled monthly reconciliation — manual reprocessing only. Runbook: `docs/runbooks/ceap_api_ingestion_2026.md`.
+5. **History 2019–2025:** static files (outside this API flow).
+6. **Legacy disabled:** monolithic `ceap_expenses_ingestion_timer` remains in the package but is off by default (`AzureWebJobs...Disabled` + `CEAP_LEGACY_MONOLITH_ENABLED=false`); emergency use only.
+7. Databricks jobs materialize Bronze → Silver → Gold; CEAP API deduplication is in `docs/pipelines/ceap_deduplication_bronze_silver.md`. Bronze/Delta consumption for **non-CEAP** RAW prefixes is not described here as complete — see `docs/pipeline_status.md`.
 
-### 5.1) Outros domínios API → fila → RAW (resumo)
+### 5.1) Other domains: API → queue → RAW (summary)
 
-Padrão comum: **timer dispatcher** (com lock em `IngestionControlApi2026`) lista ou descobre IDs, grava páginas de lista em ADLS quando aplicável, enfileira `DomainWorkMessage` JSON na fila **work**; **queue worker** pagina o sub-endpoint, escreve RAW com envelope de auditoria (`shared/raw_audit.py`), atualiza `IngestionState` e contadores do run; **poison queue** + handler marcam `POISON`; **HTTP replay** re-enfileira `FAILED`/`POISON`; **HTTP reset** (flags `ENABLE_*`) limpa artefactos por `pipeline_run_id` em ambiente controlado.
+Common pattern: **timer dispatcher** (with lock in `IngestionControlApi2026`) lists or discovers IDs, writes list pages to ADLS when applicable, enqueues JSON `DomainWorkMessage` to the domain **work** queue; **queue worker** paginates the sub-endpoint, writes RAW with the audit envelope (`shared/raw_audit.py`), updates `IngestionState` and run counters; **poison queue** + handler mark `POISON`; **HTTP replay** re-enqueues `FAILED`/`POISON`; **HTTP reset** (via `ENABLE_*` flags) cleans artifacts by `pipeline_run_id` in a controlled environment.
 
-Fluxo API → Azure Functions → **Queue Storage (mesma conta que `CEAP_QUEUE_STORAGE` / connection da Function)** → **ADLS Gen2 (lakehouse)**; Databricks permanece etapa seguinte para modelação Delta. Detalhe de filas, `pipeline_run_id` e paths: `docs/current_state.md`, `docs/raw_layer.md`, `shared/domain_catalog.py`.
+Flow: API → Azure Functions → **Queue Storage (same account as `CEAP_QUEUE_STORAGE` / Function connection)** → **ADLS Gen2 (lakehouse)**; Databricks remains the next step for Delta modeling. Queue names, `pipeline_run_id` conventions, and paths: `docs/current_state.md`, `docs/raw_layer.md`, `shared/domain_catalog.py`.
 
 ## 6) Layering Strategy (Lakehouse)
 
@@ -230,20 +230,25 @@ Current MVP workflows:
 
 MVP intentionally excludes Databricks asset deployment workflow and future function deployment workflows.
 
-## 12.1) Function App and Function Scope (current code)
+## 12.1) Function App and function inventory (current code)
 
-- **One Function App** (dev name in Terraform): `func-legisflow-ingestion-dev` (variable `function_app_name`).
-- **Legacy timer** `ceap_expenses_ingestion_timer` remains in the package but is **disabled by default** (`AzureWebJobs.ceap_expenses_ingestion_timer.Disabled`, `CEAP_LEGACY_MONOLITH_ENABLED=false` in Terraform ingestion app settings).
-- **Implemented function folders** (each with `function.json` + `__init__.py` where applicable):
-  - **CEAP:** `ceap_api_2026_dispatcher`, `ceap_api_2026_worker`, `ceap_api_2026_poison_handler`, `fn_replay_ceap_failed_messages`, `fn_reset_ceap_pipeline_run`
-  - **reference:** `reference_snapshot_dispatcher`, `reference_snapshot_worker`, `reference_snapshot_poison_handler`, `fn_replay_reference_failed_messages`, `fn_reset_reference_pipeline_run`
-  - **votacoes:** `votacoes_dispatcher`, `votacoes_worker`, `votacoes_poison_handler`, `fn_replay_votacoes_failed_messages`, `fn_reset_votacoes_pipeline_run`
-  - **proposicoes:** `proposicoes_daily_dispatcher`, `proposicoes_reconciliation_dispatcher`, `proposicoes_worker`, `proposicoes_poison_handler`, `fn_replay_proposicoes_failed_messages`, `fn_reset_proposicoes_pipeline_run`
-  - **eventos:** `eventos_daily_dispatcher`, `eventos_reconciliation_dispatcher`, `eventos_worker`, `eventos_poison_handler`, `fn_replay_eventos_failed_messages`, `fn_reset_eventos_pipeline_run`
-  - **institucional:** `institucional_dispatcher`, `institucional_worker`, `institucional_poison_handler`, `fn_replay_institucional_failed_messages`, `fn_reset_institucional_pipeline_run`
-  - **discursos:** `discursos_daily_dispatcher`, `discursos_reconciliation_dispatcher`, `discursos_worker`, `discursos_poison_handler`, `fn_replay_discursos_failed_messages`, `fn_reset_discursos_pipeline_run`
+- **One Function App** (Terraform dev name): `func-legisflow-ingestion-dev` (variable `function_app_name`).
+- **Legacy timer** `ceap_expenses_ingestion_timer` (root `function.json`) remains in the package but is **disabled by default** (`AzureWebJobs.ceap_expenses_ingestion_timer.Disabled`, `CEAP_LEGACY_MONOLITH_ENABLED=false`).
+- **Core domain folders** (each folder = one deployed function; see `function.json` in repo):
 
-Older roadmap names such as `legislative_events_ingestion_timer` / `voting_microbatch_timer` **do not** map 1:1 to folder names above; capability is covered by the **eventos** / **votacoes** domains instead.
+| Domain | Dispatchers / timers | Worker | Poison | Replay HTTP | Reset HTTP |
+|--------|----------------------|--------|--------|-------------|------------|
+| CEAP | `ceap_api_2026_dispatcher` | `ceap_api_2026_worker` | `ceap_api_2026_poison_handler` | `fn_replay_ceap_failed_messages` | `fn_reset_ceap_pipeline_run` |
+| reference | `reference_snapshot_dispatcher` | `reference_snapshot_worker` | `reference_snapshot_poison_handler` | `fn_replay_reference_failed_messages` | `fn_reset_reference_pipeline_run` |
+| votacoes | `votacoes_api_dispatcher` | `votacoes_api_worker` | `votacoes_api_poison_handler` | `fn_replay_votacoes_failed_messages` | `fn_reset_votacoes_pipeline_run` |
+| proposicoes | `proposicoes_daily_dispatcher`, `proposicoes_reconciliation_dispatcher`, optional legacy `proposicoes_dispatcher` | `proposicoes_worker` | `proposicoes_poison_handler` | `fn_replay_proposicoes_failed_messages` | `fn_reset_proposicoes_pipeline_run` |
+| eventos | `eventos_daily_dispatcher`, `eventos_reconciliation_dispatcher`, optional `eventos_dispatcher` | `eventos_worker` | `eventos_poison_handler` | `fn_replay_eventos_failed_messages` | `fn_reset_eventos_pipeline_run` |
+| institucional | `institucional_dispatcher` | `institucional_worker` | `institucional_poison_handler` | `fn_replay_institucional_failed_messages` | `fn_reset_institucional_pipeline_run` |
+| discursos | `discursos_daily_dispatcher`, `discursos_reconciliation_dispatcher`, optional `discursos_dispatcher` | `discursos_worker` | `discursos_poison_handler` | `fn_replay_discursos_failed_messages` | `fn_reset_discursos_pipeline_run` |
+
+- **Cross-cutting / ops:** `daily_summary_builder`, `reconciliation_scheduler`, `fn_reconciliation_control_http`, `fn_current_year_backfill_dispatcher`; manual reconciliation starters `fn_start_*_reconciliation` (four domains). Exact count varies with feature flags — see `docs/azure_function_app_refactor_plan.md` for a full inventory.
+
+Older roadmap names such as `legislative_events_ingestion_timer` do not match folder names 1:1; behavior lives under **eventos** / **votacoes** (and related HTTP starters).
 
 Shared libraries (`shared/`) hold API client, ADLS writer, run registry, partition state, queue messages, Raw audit/metadata, and domain-specific `*_raw_manifest.py` / `*_run.py` / `*_pipeline_reset*.py`.
 

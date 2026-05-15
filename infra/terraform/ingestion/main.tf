@@ -282,7 +282,12 @@ resource "azurerm_function_app_flex_consumption" "ingestion" {
     "DAILY_SUMMARY_CRON"                    = var.daily_summary_cron
 
     # ----- Global admin -----------------------------------------------------
-    "ENABLE_RESET_FUNCTIONS" = var.enable_reset_functions ? "true" : "false"
+    "ENABLE_CURRENT_YEAR_BACKFILL_FUNCTION" = var.enable_current_year_backfill_function ? "true" : "false"
+    "RECONCILIATION_SCHEDULER_SCHEDULE"      = var.reconciliation_scheduler_schedule
+    "ENABLE_RECONCILIATION_SCHEDULER"        = var.enable_reconciliation_scheduler ? "true" : "false"
+    "ENABLE_RECONCILIATION_CONTROL_HTTP"    = var.enable_reconciliation_control_http ? "true" : "false"
+    "PROPOSICOES_USE_CONTROLLED_RECONCILIATION" = var.proposicoes_use_controlled_reconciliation ? "true" : "false"
+    "ENABLE_RESET_FUNCTIONS"                = var.enable_reset_functions ? "true" : "false"
   }
 
   tags = var.tags

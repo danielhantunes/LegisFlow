@@ -128,20 +128,20 @@ CEAP despesas per deputy can paginate heavily. A single timer execution that pro
 
 ### Context
 
-Ingestão CEAP 2026 precisa de atualização frequente (janela móvel) sem reprocessar o ano inteiro todos os dias, mas também de uma passagem larga e idempotente por competência (reconciliação mensal). O mesmo Function App não deve ganhar uma nova função dedicada só para reconciliação.
+CEAP 2026 ingestion needs frequent updates (moving window) without reprocessing the full year every day, and also a broad, idempotent pass per reporting period (monthly reconciliation). The same Function App should not gain a dedicated function only for reconciliation.
 
 ### Decision
 
-- Um único timer `ceap_api_2026_dispatcher` escolhe o modo por **data UTC** (`CEAP_RECONCILIATION_DAY`): nesse dia só **reconciliation**; nos demais, **daily** (mês atual + meses anteriores conforme `CEAP_DAILY_LOOKBACK_MONTHS`), sempre filtrando meses futuros e respeitando `CEAP_TARGET_YEAR`.
-- Cada tick é dividido em **Fase A (snapshot de deputados)** e **Fase B (enfileiramento CEAP)**. A Fase A reusa o snapshot diário de `/deputados` quando `IngestionControlApi2026._snapshots/deputados_YYYYMMDD` está `COMPLETED` e o `_SUCCESS` existe em Raw; só chama `/deputados` quando precisa criar/recriar o snapshot. Em `reconciliation` há fallback para o snapshot completo mais recente.
-- Registo de **pipeline run** em `IngestionControlApi2026` (`_runs`, `RowKey` = `pipeline_run_id`), com fase de enqueue limitada por `CEAP_MAX_TASKS_PER_DISPATCH` (default 1000), conclusão da fase de enqueue via lista de deputados percorrida ou ticks ociosos consecutivos, e **lock** em `_locks/ceap_dispatcher_lock` (TTL 15 minutos).
-- Estado por partição em **IngestionState** (`ceap_2026`), incluindo `current_pipeline_run_id` e `mode`; fila idempotente para o mesmo `pipeline_run_id` quando status já é QUEUED/RUNNING/SUCCESS.
-- O **worker** único interpreta `mode` na mensagem; Raw inclui `pipeline_run_id` e `execution_id` no caminho para não sobrescrever blobs entre execuções.
-- **Replay** HTTP continua só para falhas (FAILED/POISON), lendo IngestionState; não é o mecanismo da reconciliação automática.
-- Meses futuros **nunca** são enfileirados.
+- A single `ceap_api_2026_dispatcher` timer selects mode by **UTC date** (`CEAP_RECONCILIATION_DAY`): on that day only **reconciliation**; otherwise **daily** (current month + prior months per `CEAP_DAILY_LOOKBACK_MONTHS`), always excluding future months and honoring `CEAP_TARGET_YEAR`.
+- Each tick splits into **Phase A (deputy snapshot)** and **Phase B (CEAP enqueue)**. Phase A reuses the daily `/deputados` snapshot when `IngestionControlApi2026._snapshots/deputados_YYYYMMDD` is `COMPLETED` and `_SUCCESS` exists in Raw; it calls `/deputados` only when it must create or recreate the snapshot. In `reconciliation` mode there is fallback to the latest complete snapshot.
+- **Pipeline run** is recorded in `IngestionControlApi2026` (`_runs`, `RowKey` = `pipeline_run_id`), with enqueue phase capped by `CEAP_MAX_TASKS_PER_DISPATCH` (default 1000), enqueue completion when the deputy list is fully walked or after consecutive idle ticks, and a **lock** at `_locks/ceap_dispatcher_lock` (TTL 15 minutes).
+- Per-partition state in **IngestionState** (`ceap_2026`), including `current_pipeline_run_id` and `mode`; queue idempotency for the same `pipeline_run_id` when status is already QUEUED/RUNNING/SUCCESS.
+- A single **worker** reads `mode` from the message; Raw paths include `pipeline_run_id` and `execution_id` so blobs are not overwritten across runs.
+- **HTTP replay** remains only for failures (FAILED/POISON), reading IngestionState; it is not the automatic reconciliation mechanism.
+- Future months are **never** enqueued.
 
 ### Consequences
 
-- Operação previsível: no mesmo dia, após o run ficar COMPLETED, ticks extras só registam log e não duplicam mensagens.
-- Reconciliação pesada é fatiada em muitas execuções do timer, sem mover trabalho de API para o dispatcher.
-- Downstream (Databricks Bronze/Silver/Gold) permanece fora deste ADR; deduplicação analítica segue políticas já documentadas.
+- Predictable operation: the same day, once the run is COMPLETED, extra ticks only log and do not duplicate messages.
+- Heavy reconciliation is spread across many timer executions without moving API work into the dispatcher.
+- Downstream (Databricks Bronze/Silver/Gold) stays out of this ADR; analytical deduplication follows existing documented policies.

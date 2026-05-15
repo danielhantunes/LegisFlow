@@ -1,35 +1,37 @@
-# LegisFlow — estado técnico atual
+# LegisFlow — current technical state
 
-Documento de continuidade para novos chats. **Última revisão alinhada ao código e Terraform no repositório** (sem garantir o que já foi aplicado em cada ambiente Azure).
+Continuity document for new sessions. **Last reviewed against code and Terraform in the repo** (does not guarantee what is applied in each Azure environment).
 
-## 1. Function App e runtime
+## 1. Function App and runtime
 
-- **Projeto de funções:** `functions/ceap_expenses_ingestion_timer/` (Python 3.11, bundle ~4, timeout 10 min, filas `maxDequeueCount` 5 — ver `host.json`).
-- **Infra (Terraform `ingestion`):** `azurerm_function_app_flex_consumption` com `RAW_STORAGE_ACCOUNT_NAME` apontando para a conta ADLS do módulo `base`, `LAKEHOUSE_FILESYSTEM_NAME` = `lakehouse`, `CEAP_QUEUE_STORAGE` na conta de storage da própria Function (filas de trabalho).
-- **Legado:** timer `ceap_expenses_ingestion_timer` (monólito) existe no pacote mas em `local.settings.json.example` está `AzureWebJobs.ceap_expenses_ingestion_timer.Disabled` = `true` e `CEAP_LEGACY_MONOLITH_ENABLED` = `false`. O fluxo ativo é **CEAP API 2026** + domínios novos.
+- **Function project:** `functions/ceap_expenses_ingestion_timer/` (Python 3.11, bundle ~4, 10-minute timeout, queue `maxDequeueCount` 5 — see `host.json`).
+- **Infra (Terraform `ingestion`):** `azurerm_function_app_flex_consumption` with `RAW_STORAGE_ACCOUNT_NAME` pointing at the ADLS account from module `base`, `LAKEHOUSE_FILESYSTEM_NAME` = `lakehouse`, `CEAP_QUEUE_STORAGE` on the Function’s storage account (work queues).
+- **Legacy:** timer `ceap_expenses_ingestion_timer` (monolith) exists in the package; `local.settings.json.example` sets `AzureWebJobs.ceap_expenses_ingestion_timer.Disabled` = `true` and `CEAP_LEGACY_MONOLITH_ENABLED` = `false`. The active path is **CEAP API 2026** + newer domains.
 
-## 2. Domínios implementados no código (por pasta de função)
+## 2. Domains implemented in code (by function folder)
 
-Cada domínio (exceto CEAP “clássico”) segue o padrão: **dispatcher (timer)** → **fila work** → **worker (queue)** → **poison** + **HTTP replay** + **HTTP reset** (reset protegido por flags).
+Each domain (except “classic” CEAP) follows: **dispatcher (timer)** → **work queue** → **worker (queue)** → **poison** + **HTTP replay** + **HTTP reset** (reset gated by flags).
 
-| Domínio | Dispatcher | Worker | Poison | Replay HTTP | Reset HTTP |
-|---------|------------|--------|--------|-------------|------------|
+| Domain | Dispatcher | Worker | Poison | Replay HTTP | Reset HTTP |
+|--------|------------|--------|--------|-------------|------------|
 | **CEAP** (`ceap`) | `ceap_api_2026_dispatcher` | `ceap_api_2026_worker` | `ceap_api_2026_poison_handler` | `fn_replay_ceap_failed_messages` | `fn_reset_ceap_pipeline_run` |
 | **reference** | `reference_snapshot_dispatcher` | `reference_snapshot_worker` | `reference_snapshot_poison_handler` | `fn_replay_reference_failed_messages` | `fn_reset_reference_pipeline_run` |
-| **votacoes** | `votacoes_dispatcher` | `votacoes_worker` | `votacoes_poison_handler` | `fn_replay_votacoes_failed_messages` | `fn_reset_votacoes_pipeline_run` |
+| **votacoes** | `votacoes_api_dispatcher` | `votacoes_api_worker` | `votacoes_api_poison_handler` | `fn_replay_votacoes_failed_messages` | `fn_reset_votacoes_pipeline_run` |
 | **proposicoes** | `proposicoes_daily_dispatcher`, `proposicoes_reconciliation_dispatcher` | `proposicoes_worker` | `proposicoes_poison_handler` | `fn_replay_proposicoes_failed_messages` | `fn_reset_proposicoes_pipeline_run` |
 | **eventos** | `eventos_daily_dispatcher`, `eventos_reconciliation_dispatcher` | `eventos_worker` | `eventos_poison_handler` | `fn_replay_eventos_failed_messages` | `fn_reset_eventos_pipeline_run` |
 | **institucional** | `institucional_dispatcher` | `institucional_worker` | `institucional_poison_handler` | `fn_replay_institucional_failed_messages` | `fn_reset_institucional_pipeline_run` |
 | **discursos** | `discursos_daily_dispatcher`, `discursos_reconciliation_dispatcher` | `discursos_worker` | `discursos_poison_handler` | `fn_replay_discursos_failed_messages` | `fn_reset_discursos_pipeline_run` |
 
-**Catálogo declarativo:** `shared/domain_catalog.py` regista `ceap`, `reference`, `votacoes`, `proposicoes`, `eventos`, `institucional`, `discursos` (filas, partition keys em tabelas, prefixos de `pipeline_run_id`, endpoints). O CEAP em produção continua a usar módulos dedicados (`ceap_*`); o catálogo para CEAP é em parte **descritivo** (comentário no ficheiro).
+Additional folders may exist for legacy microbatch (`proposicoes_dispatcher`, `eventos_dispatcher`, `discursos_dispatcher`) and cross-cutting timers/HTTP — see `docs/azure_function_app_refactor_plan.md`.
 
-## 3. Filas (nomes por defeito / exemplo)
+**Declarative catalog:** `shared/domain_catalog.py` registers `ceap`, `reference`, `votacoes`, `proposicoes`, `eventos`, `institucional`, `discursos` (queues, table partition keys, `pipeline_run_id` prefixes, endpoints). Production CEAP still uses dedicated modules (`ceap_*`); the CEAP entry in the catalog is partly **descriptive** (comment in file).
 
-Definidas em `local.settings.json.example` e criadas no Terraform `ingestion` (`azurerm_storage_queue` + `app_settings`):
+## 3. Queues (default / example names)
 
-| Domínio | Work | Poison |
-|---------|------|--------|
+Defined in `local.settings.json.example` and created in Terraform `ingestion` (`azurerm_storage_queue` + `app_settings`):
+
+| Domain | Work | Poison |
+|--------|------|--------|
 | CEAP | `ceap-api-2026-work` | `ceap-api-2026-work-poison` |
 | reference | `reference-snapshot-work` | `reference-snapshot-work-poison` |
 | votacoes | `votacoes-api-work` | `votacoes-api-work-poison` |
@@ -38,66 +40,66 @@ Definidas em `local.settings.json.example` e criadas no Terraform `ingestion` (`
 | institucional | `institucional-api-work` | `institucional-api-work-poison` |
 | discursos | `discursos-api-work` | `discursos-api-work-poison` |
 
-## 4. Endpoints da API Câmara cobertos pelo código de ingestão
+## 4. Chamber of Deputies Open Data API coverage in ingestion code
 
-- **CEAP:** `/deputados/{id}/despesas` (+ snapshot `/deputados` no dispatcher CEAP — ver runbook CEAP).
-- **reference:** `partidos`, `legislaturas`, `deputados`, `frentes`, `orgaos` (listagens paginadas por endpoint de snapshot).
-- **votacoes:** `/votacoes` (lista) + `/votacoes/{id}/votos`.
-- **proposicoes:** `/proposicoes` (lista com janela por data de tramitação) + `/proposicoes/{id}/autores` + `/proposicoes/{id}/tramitacoes`.
-- **eventos:** `/eventos` (lista com janela) + `/eventos/{id}/deputados|orgaos|pauta|votacoes`.
-- **institucional:** parents `/orgaos`, `/partidos`, `/frentes`, `/legislaturas` + sub-rotas `membros`, `lideres`, `mesa` conforme `domain_catalog`.
-- **discursos:** `/deputados` (snapshot no dispatcher discursos) + `/deputados/{id}/discursos` com `dataInicio`/`dataFim` no worker.
+- **CEAP:** `/deputados/{id}/despesas` (+ `/deputados` snapshot in CEAP dispatcher — see CEAP runbook).
+- **reference:** `partidos`, `legislaturas`, `deputados`, `frentes`, `orgaos` (paginated list per snapshot endpoint).
+- **votacoes:** `/votacoes` (list) + `/votacoes/{id}/votos`.
+- **proposicoes:** `/proposicoes` (list with procedural date window, `dataInicio`/`dataFim`) + `/proposicoes/{id}/autores` + `/proposicoes/{id}/tramitacoes`.
+- **eventos:** `/eventos` (windowed list) + `/eventos/{id}/deputados|orgaos|pauta|votacoes`.
+- **institucional:** parent `/orgaos`, `/partidos`, `/frentes`, `/legislaturas` + sub-routes `membros`, `lideres`, `mesa` per `domain_catalog`.
+- **discursos:** `/deputados` (snapshot in discursos dispatcher) + `/deputados/{id}/discursos` with `dataInicio`/`dataFim` in worker.
 
-Detalhe de paths HTTP está nos `function.json` (rotas `replay/*` e `legisflow/reset/*`).
+HTTP path detail is in each `function.json` (`replay/*` and `legisflow/reset/*` routes).
 
-## 5. Estado e controlo (Azure Tables)
+## 5. State and control (Azure Tables)
 
-- **`IngestionState`:** progresso por partição; partition keys **por domínio** (ex.: `ceap_2026`, `eventos_2026`, … — ver `DomainSpec.state_partition_key`).
-- **`IngestionControlApi2026`:** runs, locks e snapshots; partition keys por domínio (`_runs`, `_runs_eventos`, …).
-- **Locks:** dispatchers usam linha de lock por domínio (ex.: `ceap_dispatcher_lock`, `eventos_dispatcher_lock`) para evitar ticks concorrentes.
-- **CEAP:** reconciliação de manifest/control com `IngestionState` (inclui partidas com `current_pipeline_run_id` **ou** `last_pipeline_run_id` no filtro de contagens, conforme implementação em `ceap_partition_state.py`).
+- **`IngestionState`:** per-partition progress; partition keys **per domain** (e.g. `ceap_2026`, `eventos_2026`, … — see `DomainSpec.state_partition_key`).
+- **`IngestionControlApi2026`:** runs, locks, snapshots; partition keys per domain (`_runs`, `_runs_eventos`, …).
+- **Locks:** dispatchers use one lock row per domain (e.g. `ceap_dispatcher_lock`, `eventos_dispatcher_lock`) to avoid concurrent ticks.
+- **CEAP:** manifest/control reconciliation with `IngestionState` (includes partitions matching `current_pipeline_run_id` **or** `last_pipeline_run_id` in count filters, per `ceap_partition_state.py`).
 
-## 6. Camada RAW (ADLS Gen2)
+## 6. RAW layer (ADLS Gen2)
 
 - **Filesystem:** `lakehouse` (default).
-- **Prefixo comum:** `raw/camara/...` por domínio; ficheiros JSON por página + `metadata.json` e marcador `_SUCCESS` quando o run está **estritamente** concluído (contrato em `shared/metadata.py` e manifests por domínio).
-- **Diretórios “vazios” no Terraform `base`:** lista mínima em `infra/terraform/base/main.tf` (`lakehouse_directories`); **novos ramos** `raw/camara/<domínio>/...` são criados **implicitamente** na primeira escrita pela Function (comportamento ADLS Gen2).
+- **Common prefix:** `raw/camara/...` per domain; JSON per page + `metadata.json` and `_SUCCESS` when the run is **strictly** complete (contract in `shared/metadata.py` and per-domain manifests).
+- **“Empty” dirs in Terraform `base`:** minimal list in `infra/terraform/base/main.tf` (`lakehouse_directories`); **new** `raw/camara/<domain>/...` branches are created **implicitly** on first write (ADLS Gen2 behavior).
 
-## 7. Manifests / metadata existentes (módulos)
+## 7. Manifests / metadata modules
 
-- **Genérico:** `shared/metadata.py` (contrato v1.0, `hash_strategy`, `audit_fields_applied` onde aplicável).
+- **Generic:** `shared/metadata.py` (v1.0 contract, `hash_strategy`, `audit_fields_applied` where used).
 - **CEAP:** `shared/ceap_raw_manifest.py`, `shared/deputies_snapshot.py`.
-- **reference:** `shared/reference_raw_manifest.py` (e helpers de reset).
-- **votacoes / proposicoes / eventos / institucional / discursos:** `shared/*_raw_manifest.py` correspondentes + `shared/*_run.py` para workers.
+- **reference:** `shared/reference_raw_manifest.py` (+ reset helpers).
+- **votacoes / proposicoes / eventos / institucional / discursos:** matching `shared/*_raw_manifest.py` + `shared/*_run.py` for workers.
 
-## 8. Testes automatizados
+## 8. Automated tests
 
-- Pasta `tests/` na raiz do repositório (pytest); cobertura inclui catálogo, metadata, audit envelope, CEAP reset/manifest, filas, e domínios `votacoes`, `proposicoes`, `eventos`, `institucional`, `discursos` (runs e reset helpers). **Não substituem** testes de integração em Azure.
+- `tests/` at repo root (pytest); covers catalog, metadata, audit envelope, CEAP reset/manifest, queues, and domains `votacoes`, `proposicoes`, `eventos`, `institucional`, `discursos` (runs and reset helpers). **Does not replace** Azure integration tests.
 
-## 9. CI/CD (workflows observados)
+## 9. CI/CD (observed workflows)
 
-- `terraform-tfstate-backend-dev.yml` — backend de state.
-- `terraform-base-dev.yml` — RG + ADLS + diretórios iniciais, etc.
-- `terraform-ingestion-dev.yml` — Function App ingestion + filas + app settings (lê outputs do base).
-- `terraform-databricks-dev.yml` — workspace Databricks.
-- `deploy-function-ceap.yml` — deploy do pacote Python.
+- `terraform-tfstate-backend-dev.yml` — state backend.
+- `terraform-base-dev.yml` — RG + ADLS + initial dirs, etc.
+- `terraform-ingestion-dev.yml` — ingestion Function App + queues + app settings (reads base outputs).
+- `terraform-databricks-dev.yml` — Databricks workspace.
+- `deploy-function-ceap.yml` — Python package deploy.
 
-## 10. Problemas abertos / inconsistências documentadas
+## 10. Open issues / documented inconsistencies
 
-1. **`docs/decisions.md` ADR-003** ainda descreve “apenas CEAP”; o **código** já inclui vários domínios na mesma Function App — tratar ADR como histórico até revisão formal.
-2. **Ambiente:** este ficheiro descreve o **repositório**; `terraform apply` / deploy podem estar à frente ou atrás do Git em cada subscription.
-3. **Bronze/Silver/Gold** para os novos prefixos RAW: pipelines documentados no repo focam CEAP; **consumo Databricks** dos novos domínios não está descrito neste doc como concluído.
-4. **Replay discursos:** payload pode reutilizar `last_window_date_*` da partição se existir; se não existir, o replay pode precisar de `date_start`/`date_end` explícitos (comportamento implementado no handler HTTP).
+1. **`docs/decisions.md` ADR-003** still describes “CEAP only”; **code** already includes multiple domains in the same Function App — treat ADR as historical until formally revised.
+2. **Environment:** this file describes the **repository**; `terraform apply` / deploy may lead or lag Git in each subscription.
+3. **Bronze/Silver/Gold** for new RAW prefixes: pipelines documented in-repo focus on CEAP; **Databricks consumption** of other domains is not described here as complete.
+4. **Discursos replay:** payload may reuse `last_window_date_*` from partition when present; otherwise replay may need explicit `date_start`/`date_end` (implemented in HTTP handler).
 
-## 11. Decisões técnicas já incorporadas no código
+## 11. Technical decisions already in code
 
-- **Um catálogo** (`domain_catalog.py`) para nomes de filas, partition keys e contratos de `pipeline_run_id` dos domínios genéricos.
-- **Auditoria RAW:** `_audit`, `_payload_hash`, `_record_uid`, `_record_hash`; chaves de negócio com paths aninhados (ex.: `deputado_.id`, `faseEvento.titulo`) via `shared/raw_audit.py`.
-- **Reset HTTP:** desligado por defeito (`ENABLE_RESET_FUNCTIONS` e flags por domínio); reset admin é para dev/test.
-- **Poison:** fila dedicada por domínio + handler que atualiza `IngestionState` e contadores do run quando aplicável.
+- **Single catalog** (`domain_catalog.py`) for queue names, table partition keys, and generic-domain `pipeline_run_id` contracts.
+- **RAW audit:** `_audit`, `_payload_hash`, `_record_uid`, `_record_hash`; business keys with nested paths (e.g. `deputado_.id`, `faseEvento.titulo`) via `shared/raw_audit.py`.
+- **HTTP reset:** off by default (`ENABLE_RESET_FUNCTIONS` and per-domain flags); admin reset for dev/test.
+- **Poison:** dedicated queue per domain + handler updating `IngestionState` and run counters when applicable.
 
-## 12. Documentação histórica preservada
+## 12. Preserved historical documentation
 
 - `docs/runbooks/ceap_api_ingestion_2026.md`
 - `docs/pipelines/ceap_deduplication_bronze_silver.md`
-- `docs/decisions.md` (ADRs; ver nota sobre ADR-003 acima)
+- `docs/decisions.md` (ADRs; note on ADR-003 above)

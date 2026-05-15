@@ -1,50 +1,50 @@
-# Estado dos pipelines — LegisFlow
+# Pipeline status — LegisFlow
 
-Legenda: **Funciona** = implementado no repositório com fluxo completo dispatcher → fila → worker → RAW; **Parcial** = parte implementada ou dependente de deploy/validação em Azure; **Não iniciado** = não há implementação correspondente no repo.
+Legend: **Healthy** = implemented in the repository with a full dispatcher → queue → worker → RAW flow; **Partial** = partially implemented or depends on Azure deploy/validation; **Not started** = no matching implementation in this repo.
 
-## 1. Ingestão API → RAW (Azure Functions)
+## 1. API ingestion → RAW (Azure Functions)
 
-| Pipeline | Estado no código | Notas |
-|----------|------------------|--------|
-| **CEAP 2026** (`ceap_api_2026_*`) | **Funciona** | Dispatcher com daily/reconciliation, snapshot deputados, reconciliação de manifest com `IngestionState`, filas CEAP. |
-| **reference snapshot** | **Funciona** | Partidos, legislaturas, deputados, frentes, órgãos; timer + worker + poison + replay + reset. |
-| **votacoes** | **Funciona** | Lista `/votacoes` + fanout `/votacoes/{id}/votos`; microbatch por minuto. |
-| **proposicoes** | **Funciona** | Lista + fanout autores/tramitações; microbatch. |
-| **eventos** | **Funciona** | Lista + fanout 4 sub-rotas; microbatch. |
-| **institucional** | **Funciona** | Parents + fanout membros/líderes/mesa; run id diário. |
-| **discursos** | **Funciona** | Snapshot `/deputados` no dispatcher + fanout `/deputados/{id}/discursos` com janela; microbatch. |
-| **CEAP monólito** (`ceap_expenses_ingestion_timer`) | **Desativado** | Mantido no pacote; disabled por configuração exemplo e Terraform ingestion. |
+| Pipeline | Code status | Notes |
+|----------|-------------|-------|
+| **CEAP 2026** (`ceap_api_2026_*`) | **Healthy** | Dispatcher with daily/reconciliation, deputies snapshot, manifest reconciliation with `IngestionState`, CEAP queues. |
+| **reference snapshot** | **Healthy** | Parties, legislatures, deputies, frentes, orgaos; timer + worker + poison + replay + reset. |
+| **votacoes** | **Healthy** | List `/votacoes` + fanout `/votacoes/{id}/votos`; microbatch every few minutes. |
+| **proposicoes** | **Healthy** | List + fanout authors/tramitacoes; microbatch. |
+| **eventos** | **Healthy** | List + fanout 4 sub-routes; microbatch. |
+| **institucional** | **Healthy** | Parents + fanout membros/lideres/mesa; daily run id. |
+| **discursos** | **Healthy** | `/deputados` snapshot in dispatcher + fanout `/deputados/{id}/discursos` with window; microbatch. |
+| **CEAP monolith** (`ceap_expenses_ingestion_timer`) | **Disabled** | Still in package; disabled in example config and Terraform ingestion. |
 
-## 2. Infraestrutura (Terraform)
+## 2. Infrastructure (Terraform)
 
-| Módulo | Estado |
+| Module | Status |
 |--------|--------|
-| `bootstrap-tfstate` | **Funciona** (workflow dedicado) — backend remoto. |
-| `base` | **Funciona** — ADLS lakehouse, RG, diretórios iniciais. |
-| `ingestion` | **Funciona** no código — Function Flex + filas + app settings para **todos** os domínios listados em `current_state.md`. |
-| `databricks` | **Funciona** (workspace) — automação de notebooks/jobs fora do repo por decisão MVP (ver `docs/decisions.md`). |
+| `bootstrap-tfstate` | **Healthy** (dedicated workflow) — remote backend. |
+| `base` | **Healthy** — ADLS lakehouse, RG, initial directories. |
+| `ingestion` | **Healthy** in code — Flex Function + queues + app settings for **all** domains listed in `current_state.md`. |
+| `databricks` | **Healthy** (workspace) — notebook/job automation outside repo by MVP decision (see `docs/decisions.md`). |
 
-**Parcial:** o estado “em produção” depende do último `terraform apply` / workflow e da branch (`terraform-ingestion-dev` aplica só a partir de `main`).
+**Partial:** “In production” state depends on last `terraform apply` / workflow and branch (`terraform-ingestion-dev` applies only from `main` per workflow design).
 
-## 3. Qualidade e testes
+## 3. Quality and tests
 
-| Área | Estado |
+| Area | Status |
 |------|--------|
-| Testes unitários (`tests/`) | **Funciona** localmente (pytest) — sem Azure. |
-| Testes E2E contra API Câmara + Azure | **Não** cobertos automaticamente neste repo (tratar como gap operacional). |
+| Unit tests (`tests/`) | **Healthy** locally (pytest) — no Azure required. |
+| E2E against Câmara API + Azure | **Not** automated in this repo (operational gap). |
 
-## 4. Consumo downstream (Bronze / Databricks)
+## 4. Downstream consumption (Bronze / Databricks)
 
-| Área | Estado |
+| Area | Status |
 |------|--------|
-| Documentação deduplicação CEAP Bronze/Silver | **Existe** (`docs/pipelines/ceap_deduplication_bronze_silver.md`). |
-| Pipelines Delta para **novos** prefixos RAW (`eventos`, `discursos`, …) | **Não documentado** neste repositório como implementado; assumir **fora de escopo** do código de Functions até haver notebooks/jobs. |
+| CEAP Bronze/Silver deduplication doc | **Exists** (`docs/pipelines/ceap_deduplication_bronze_silver.md`). |
+| Delta pipelines for **new** RAW prefixes (`eventos`, `discursos`, …) | **Not documented** here as implemented; assume **out of scope** for the Functions codebase until notebooks/jobs exist. |
 
-## 5. Blockers conhecidos
+## 5. Known blockers
 
-- Nenhum **blocker de compilação** reportado no estado atual do workspace; validação em Azure (quotas, RBAC, `terraform plan`) é responsabilidade do deploy.
-- **Possível inconsistência documental:** `docs/decisions.md` ADR-003 afirma “só CEAP”; o código já contém múltiplos domínios — ver `docs/current_state.md` secção “Problemas abertos”.
+- No **build** blockers reported for current workspace; Azure validation (quotas, RBAC, `terraform plan`) is deploy-owned.
+- **Possible doc inconsistency:** `docs/decisions.md` ADR-003 says “CEAP only”; code already has multiple domains — see `docs/current_state.md` section “Open issues”.
 
-## 6. Problemas técnicos já observados (histórico)
+## 6. Previously observed technical issues (historical)
 
-- Conflito Terraform **409** em paths ADLS duplicados entre `base` e criação implícita pela app — mitigado por lista mínima de `lakehouse_directories` (contexto histórico; não reabrir sem revisão).
+- Terraform **409** on duplicate ADLS paths between `base` and implicit app-created paths — mitigated by minimal `lakehouse_directories` list (historical context; do not reopen without review).

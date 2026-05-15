@@ -480,6 +480,36 @@ variable "daily_summary_cron" {
   default     = "0 */20 * * * *"
 }
 
+variable "enable_current_year_backfill_function" {
+  type        = bool
+  description = "When true, sets ENABLE_CURRENT_YEAR_BACKFILL_FUNCTION for the manual HTTP backfill (no timer)."
+  default     = false
+}
+
+variable "reconciliation_scheduler_schedule" {
+  type        = string
+  description = "NCRONTAB for reconciliation_scheduler (checkpointed batches; default every 20 minutes UTC)."
+  default     = "0 */20 * * * *"
+}
+
+variable "enable_reconciliation_scheduler" {
+  type        = bool
+  description = "When true, sets ENABLE_RECONCILIATION_SCHEDULER for multi-tick reconciliation batches."
+  default     = false
+}
+
+variable "enable_reconciliation_control_http" {
+  type        = bool
+  description = "When true, sets ENABLE_RECONCILIATION_CONTROL_HTTP for start/status/pause/resume/cancel."
+  default     = false
+}
+
+variable "proposicoes_use_controlled_reconciliation" {
+  type        = bool
+  description = "When true, weekly proposicoes reconciliation timer only registers a ReconciliationControl row (requires scheduler)."
+  default     = false
+}
+
 # ---------------------------------------------------------------------------
 # Global admin
 # ---------------------------------------------------------------------------

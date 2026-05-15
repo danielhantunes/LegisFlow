@@ -76,7 +76,9 @@ def execute_proposicoes_reconciliation_tick(
     date_end: str,
     target_year: int,
     recon_day: int,
-) -> None:
+    pipeline_run_id: str | None = None,
+    max_messages_per_tick_override: int | None = None,
+) -> dict[str, Any]:
     def _as_utc(dt: datetime) -> datetime:
         if dt.tzinfo is None:
             return dt.replace(tzinfo=UTC)
@@ -84,7 +86,12 @@ def execute_proposicoes_reconciliation_tick(
 
     now_utc = _as_utc(now)
     domain = PROPOSICOES_DOMAIN
-    pipeline_run_id = proposicoes_reconciliation_run_id(now_utc.strftime("%Y-%m-%d"))
+    pid_override = (pipeline_run_id or "").strip()
+    pipeline_run_id = (
+        pid_override
+        if pid_override
+        else proposicoes_reconciliation_run_id(now_utc.strftime("%Y-%m-%d"))
+    )
     window_start = datetime.fromisoformat(f"{date_start}T00:00:00+00:00")
     window_end_cap = datetime.fromisoformat(f"{date_end}T23:59:59.999999+00:00")
     window_end = min(now_utc, window_end_cap)
@@ -96,7 +103,10 @@ def execute_proposicoes_reconciliation_tick(
     raw_account = os.environ["RAW_STORAGE_ACCOUNT_NAME"]
     lock_ttl = int(os.getenv("PROPOSICOES_LOCK_TTL_MINUTES", str(domain.lock_ttl_minutes)))
     max_messages_per_tick = max(
-        1, int(os.getenv("PROPOSICOES_MAX_MESSAGES_PER_TICK", "1000"))
+        1,
+        int(max_messages_per_tick_override)
+        if max_messages_per_tick_override is not None
+        else int(os.getenv("PROPOSICOES_MAX_MESSAGES_PER_TICK", "1000")),
     )
     max_list_pages = int(os.getenv("PROPOSICOES_MAX_LIST_PAGES", "200"))
     max_pages_tick = max(1, int(os.getenv("PROPOSICOES_RECON_MAX_PAGES_PER_TICK", "40")))
@@ -121,7 +131,11 @@ def execute_proposicoes_reconciliation_tick(
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
         )
-        return
+        return {
+            "skipped": True,
+            "reason": "already_completed",
+            "pipeline_run_id": pipeline_run_id,
+        }
 
     acquired, lock_token = registry.try_acquire_dispatcher_lock(
         mode="reconciliation",
@@ -136,7 +150,11 @@ def execute_proposicoes_reconciliation_tick(
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
         )
-        return
+        return {
+            "skipped": True,
+            "reason": "lock_held",
+            "pipeline_run_id": pipeline_run_id,
+        }
 
     run = registry.get_run(pipeline_run_id) or {}
     if str(run.get("status", "")).upper() == "COMPLETED":
@@ -148,7 +166,11 @@ def execute_proposicoes_reconciliation_tick(
             domain=domain.name,
             pipeline_run_id=pipeline_run_id,
         )
-        return
+        return {
+            "skipped": True,
+            "reason": "already_completed_after_lock",
+            "pipeline_run_id": pipeline_run_id,
+        }
 
     started_at = str(run.get("started_at") or now.isoformat())
     listing_already = bool(run.get("recon_listing_complete"))
@@ -534,6 +556,18 @@ def execute_proposicoes_reconciliation_tick(
             messages_skipped_queued=skipped_already_queued,
             run_status_final=run_status_final,
         )
+        return {
+            "skipped": False,
+            "pipeline_run_id": pipeline_run_id,
+            "listing_complete": listing_complete,
+            "enqueue_phase_complete": enqueue_phase_complete,
+            "run_status_final": run_status_final,
+            "records_seen": total_list_recs,
+            "messages_enqueued": enqueued_now,
+            "skipped_same_list_hash": skipped_same_list_hash,
+            "skipped_already_queued": skipped_already_queued,
+            "distinct_proposicao_ids": n_ids,
+        }
     except Exception as exc:
         failed_at = datetime.now(UTC).isoformat()
         log_structured(

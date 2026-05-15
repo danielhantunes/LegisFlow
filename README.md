@@ -50,14 +50,34 @@ Flow:
 - Main resource group: `rg-legisflow-dev`
 - Terraform state resource group: `rg-legisflow-dev-tfstate`
 
+## Documentation
+
+**Start here (documentation index):** [`docs/README.md`](docs/README.md)
+
+| Doc | Purpose |
+|-----|---------|
+| [`docs/current_state.md`](docs/current_state.md) | What runs today: functions, queues, tables |
+| [`docs/architecture.md`](docs/architecture.md) | Technical architecture and data flow |
+| [`docs/current_year_backfill.md`](docs/current_year_backfill.md) | Manual HTTP backfill for the current API year |
+| [`docs/reconciliation_controlled.md`](docs/reconciliation_controlled.md) | Checkpointed proposicoes reconciliation (scheduler + optional HTTP) |
+| [`docs/ingestion_operational_cost_plan.md`](docs/ingestion_operational_cost_plan.md) | Cost drivers (executions, logs, ADLS writes) and mitigations |
+| [`docs/azure_function_app_refactor_plan.md`](docs/azure_function_app_refactor_plan.md) | Future simplification plan (generic dispatchers/workers) |
+
 ## Repository Structure
 
 ```text
 legisflow/
   README.md
   docs/
+    README.md          # documentation index (PT/EN hub — start here)
     architecture.md
+    current_state.md
+    current_year_backfill.md
+    reconciliation_controlled.md
+    ingestion_operational_cost_plan.md
     decisions.md
+    raw_layer.md
+    pipeline_status.md
     runbooks/
       ceap_api_ingestion_2026.md
     pipelines/
@@ -71,11 +91,9 @@ legisflow/
   functions/
     ceap_expenses_ingestion_timer/
       shared/
-      ceap_api_2026_dispatcher/
-      ceap_api_2026_worker/
-      ceap_api_2026_poison_handler/
-      fn_replay_ceap_failed_messages/
-    votacoes_microbatch/
+      ceap_api_2026_*/
+      *_{dispatcher,worker,poison_handler}/
+      fn_*  (HTTP replay, reset, start-reconciliation, backfill, …)
   databricks/
     notebooks/
       bronze/
@@ -139,6 +157,4 @@ Secrets:
 
 ## Next Steps
 
-The next implementation step is creating the Databricks Terraform module and deployment workflows:
-
-- `.github/workflows/terraform-databricks-dev.yml`
+See `docs/todo.md` and `docs/pipeline_status.md` for current priorities. Historical note: Databricks Terraform and workflows (`terraform-databricks-dev.yml`) are part of the broader delivery plan in `docs/README.md`.
